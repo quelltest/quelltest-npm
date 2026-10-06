@@ -4,3 +4,4 @@ export declare function scan(root?: string): { version: 1; root: string; finding
 export declare function score(report: { findings: Finding[] }): Report['summary'];
 export declare function report(root?: string): Report;
 export declare function generate(report: Report, options?: { destination?: string; write?: boolean; existing?: string }): Finding[];
+export declare function verifyGenerated(source: string): { correctCode: { passed: boolean; error?: string }; injectedBug: { passed: boolean; observedFailure: { passed: boolean; error?: string } } };

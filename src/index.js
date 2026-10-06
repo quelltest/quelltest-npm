@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { generate } from './generator.js';
+import { verifyGenerated } from './verification.js';
 
 const EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx']);
 const SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'coverage']);
@@ -61,3 +62,4 @@ export function report(root = '.') {
 }
 
 export { generate };
+export { verifyGenerated };

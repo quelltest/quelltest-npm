@@ -8,7 +8,7 @@
     ".": { "import": "./src/index.js", "require": "./src/index.cjs", "types": "./src/index.d.ts" }
   },
   "files": ["src", "README.md", "LICENSE"],
-  "scripts": { "test": "node --test", "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js", "pack:check": "npm pack --dry-run", "test:ci": "npm test && npm run check && npm run pack:check" },
+  "scripts": { "test": "node --test", "test:verify": "node scripts/verification-smoke.mjs", "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check scripts/verification-smoke.mjs", "pack:check": "npm pack --dry-run", "test:ci": "npm test && npm run test:verify && npm run check && npm run pack:check" },
   "engines": { "node": ">=20" },
   "keywords": ["testing", "test-generation", "edge-cases", "mutation-testing", "typescript", "production-readiness"],
   "license": "MIT"
