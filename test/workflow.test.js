@@ -11,7 +11,8 @@ test('CI workflow covers supported Node versions and package quality checks', ()
 
 test('Python quality checks are explicit and conditional', () => {
   const workflow = fs.readFileSync('.github/workflows/ci.yml', 'utf8');
-  assert.match(workflow, /hashFiles\('\*\*\/\*\.py'\)/);
+  assert.match(workflow, /detect-python/);
+  assert.match(workflow, /find \. -name '\*\.py'/);
   assert.match(workflow, /ruff check \./);
   assert.match(workflow, /flake8 \./);
 });
