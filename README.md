@@ -28,4 +28,4 @@ npm run test:ci
 
 The CI workflow runs Node checks on Node 20 and 22. Ruff and Flake8 are conditional quality jobs: they run only when Python files are added, so the npm package does not pull in unrelated Python tooling while mixed-language contributions remain covered.
 
-MIT licensed. Maintained by Shashank Bindal.
+Licensed under the [Apache License 2.0](LICENSE). Maintained by Shashank Bindal.
