@@ -16,6 +16,8 @@
   "files": [
     "src",
     "docs",
+    "eval",
+    "scripts/eval.mjs",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",

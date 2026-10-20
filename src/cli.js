@@ -16,6 +16,7 @@ const HELP = `Usage: quell <${COMMANDS.join('|')}> [PATH] [options]
        quell verify TEST_FILE --source FILE [--function NAME] [--runner NAME]
        quell gate --diff REF [--strict] [--json|--sarif]
        quell mcp                       (MCP server on stdio: tools find, verify, gate)
+       quell eval                      (run the bundled benchmark: rule recall, false positives, verifier accuracy)
 
 PATH may be a directory or a single file (default: .).
 
@@ -99,6 +100,13 @@ async function run(argv) {
   const { command, root, hasPath, options } = parseArgs(argv);
   if (options.help) { console.log(HELP); return EXIT.ok; }
   if (options.version) { console.log(VERSION); return EXIT.ok; }
+  if (command === 'eval') {
+    const { evaluate, evaluateGate } = await import('../scripts/eval.mjs');
+    const rules = evaluate();
+    const verifier = evaluateGate();
+    console.log(JSON.stringify({ rules, verifier: { ...verifier, rows: undefined } }, null, 2));
+    return rules.noise.length || verifier.wrong.length ? EXIT.belowThreshold : EXIT.ok;
+  }
   if (command === 'gate') return runGate(options);
   if (command === 'mcp') {
     const { serve } = await import('./mcp.js');

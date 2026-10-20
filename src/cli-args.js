@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 
-export const COMMANDS = ['find', 'score', 'generate', 'verify', 'gate', 'mcp'];
+export const COMMANDS = ['find', 'score', 'generate', 'verify', 'gate', 'mcp', 'eval'];
 
 const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify', 'include-covered', 'in-place', 'findings', 'strict']);
 const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm', 'min-score', 'handoff', 'min-confidence']);
