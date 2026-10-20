@@ -83,4 +83,13 @@ npm run test:ci
 
 CI runs on Node 20, 22 and 24 (plus Windows and macOS on Node 22). A PR workflow runs quelltest on every pull request, limited to changed lines, and publishes the report to the job summary and a PR comment.
 
+## Community
+
+- [Contributing](CONTRIBUTING.md): setup, how to add a rule, tests and pull requests
+- [Code of Conduct](CODE_OF_CONDUCT.md) (Contributor Covenant 2.1)
+- [Security policy](SECURITY.md): report vulnerabilities privately
+- [Support](SUPPORT.md): where to ask, what to include
+- [Governance](GOVERNANCE.md): who decides what
+- [Architecture](docs/architecture.md), [agents and CI](docs/agents.md), [repository automation](docs/automation.md), [changelog](CHANGELOG.md)
+
 Licensed under the [Apache License 2.0](LICENSE). Maintained by Shashank Bindal.
