@@ -19,6 +19,26 @@ Small GitHub Actions workflows that do the routine work so a change goes from id
 
 Issue forms (`.github/ISSUE_TEMPLATE`), the PR template and `CODEOWNERS` keep reports and PRs consistent.
 
+## Custom agents (GitHub Agents tab, Copilot CLI, VS Code)
+
+`.github/agents/*.agent.md` defines seven custom agents: a coordinator and six specialists. They are prompts with a fixed tool list, not workflows, so they run only when someone (or an assignment) starts them. They need GitHub Copilot with custom agents enabled for the repository; nothing here costs anything until you use one.
+
+| Agent | Use it to | Can edit files |
+| --- | --- | --- |
+| `maintainer` | Take a goal and run the right specialists in order; the only agent that can call the others | no |
+| `researcher` | Answer a product or technical question with cited sources, written to `research/` | `research/` only, by instruction |
+| `issue-planner` | Turn a report into verified, scoped issues with acceptance criteria and a tracking issue | no |
+| `implementer` | Ship one issue as one PR with tests, docs and changelog | yes |
+| `code-reviewer` | Review a PR independently: probes, test and eval runs, ranked findings | no |
+| `release-manager` | Check a release is ready, write notes, give the human the tag and publish commands | no |
+| `dependency-triage` | Decide merge, hold or ignore for Dependabot PRs and alerts, with a merge order | no |
+
+**Starting one:** on github.com open the **Agents** tab and pick the agent; or assign an issue to Copilot and choose the agent; or run `/agent` in Copilot CLI. A good first prompt for the coordinator: "Read research/<report>.md, verify the findings against the code, create the issues, implement each one in its own PR, and have each PR reviewed."
+
+**What stays human:** every agent carries the same house rules (Apache-2.0, open-core, no attribution lines, never merge, publish, tag, change settings or touch secrets). The agents prepare; you merge, publish and apply protection. A test keeps the rules block identical across the files.
+
+The Claude workflows below are separate: they react to comments and PR events automatically.
+
 ## Switching the Claude agents on
 
 1. Install the Claude GitHub app and add the secret: in Claude Code run `/install-github-app` (needs repository admin), or add the `ANTHROPIC_API_KEY` secret by hand and install the app from the action's setup page.
