@@ -81,8 +81,15 @@ test('the recommended branch protection is valid, blocks force pushes and deleti
   assert.ok(!rules.required_status_checks.contexts.some((context) => /macos/.test(context)), 'macOS is not required while its runners are unreliable');
 });
 
-test('the triage agent only labels from conventional-commit titles and skips fork PRs', () => {
-  const text = agents.find(([file]) => file === 'agent-triage.yml')[1];
-  assert.match(text, /\(feat\|fix\|docs\|test\|chore\|design\|refactor\|perf\)/);
-  assert.match(text, /head\.repo\.full_name == github\.repository/);
+test('the issue labeller only labels from conventional-commit titles and the PR labeller skips fork PRs', () => {
+  const issues = agents.find(([file]) => file === 'agent-triage-issues.yml')[1];
+  assert.match(issues, /\(feat\|fix\|docs\|test\|chore\|design\|refactor\|perf\)/);
+  const pulls = agents.find(([file]) => file === 'agent-triage.yml')[1];
+  assert.match(pulls, /head\.repo\.full_name == github\.repository/);
+});
+
+test('each agent workflow reacts to one kind of event, so pull requests never list skipped agent jobs', () => {
+  const triggers = (text) => [...text.slice(text.indexOf('\non:'), text.indexOf('\npermissions:')).matchAll(/^  ([a-z_]+):/gm)].map((match) => match[1]);
+  assert.deepEqual(triggers(agents.find(([file]) => file === 'agent-triage-issues.yml')[1]), ['issues']);
+  assert.deepEqual(triggers(agents.find(([file]) => file === 'agent-triage.yml')[1]), ['pull_request']);
 });
