@@ -7,7 +7,8 @@ Small GitHub Actions workflows that do the routine work so a change goes from id
 
 | Agent | Workflow | Trigger | What it does |
 | --- | --- | --- | --- |
-| Triage and labels | `agent-triage.yml` | issue opened/edited, PR opened/updated | Labels an issue from its conventional-commit title (`fix(scan): ...` -> `bug`, `scan`), assigns the maintainer, labels a PR from the paths it touches (`scan`, `generate`, `verify`, `gate`, `mcp`, `dependencies`, `cli`, `documentation`, `testing`, `ci`). Creates missing labels. |
+| Label issues | `agent-triage-issues.yml` | issue opened/edited | Labels an issue from its conventional-commit title (`fix(scan): ...` -> `bug`, `scan`) and assigns the maintainer. Creates missing labels. |
+| Label pull requests | `agent-triage.yml` | PR opened/updated | Labels a PR from the paths it touches (`scan`, `generate`, `verify`, `gate`, `mcp`, `dependencies`, `cli`, `documentation`, `testing`, `ci`). Creates missing labels. |
 | PR guard | `agent-pr-guard.yml` | PR opened/edited/updated | **Fails** when the PR targets a branch other than the default (a stacked PR merged into its base never reaches `main` and never closes its issues). Warns when there is no `Closes #n`, when `src/` changed without `CHANGELOG.md` or tests, and when the description carries an attribution line. |
 | Quelltest gate and report | `pr-report.yml` | PR | Runs quelltest on changed lines, gates against weakened tests, comments the report. |
 | Release | `agent-release.yml` | tag `v*` | Checks the tag against `package.json` and the changelog, runs `npm run test:ci`, publishes to npm if `NPM_TOKEN` exists (with provenance when the repo is public), creates the GitHub release from the changelog section. |
@@ -59,5 +60,6 @@ In the web UI the same thing is Settings -> Branches -> Add branch protection ru
 ## Limits
 
 - The Claude workflows follow the documented inputs of `anthropics/claude-code-action@v1` (`anthropic_api_key`, `prompt`, `claude_args`, `trigger_phrase`), but they have not been run against a live repository from here: expect to adjust them on first use, and watch the cost of the review agent on large PRs.
+- `Agent: PR review` shows as **Skipped** on every pull request until you set the repository variable `CLAUDE_AGENTS_ENABLED=true` (and the `ANTHROPIC_API_KEY` secret). That is the opt-in switch working, not a failure. GitHub cannot hide a skipped job, and the variable cannot be read in a workflow trigger.
 - The triage agent only understands conventional-commit titles. Anything else is left unlabelled.
 - The release agent cannot create the tag and cannot get around npm's two-factor rules.
