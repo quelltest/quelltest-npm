@@ -27,6 +27,7 @@ export function evaluate() {
     total: rows.length,
     detected,
     recall: detected / rows.length,
+    detectableRecall: detectable.length ? detected / detectable.length : 0,
     missedDetectable: detectable.filter((row) => !row.detected).map((row) => row.id),
     knownMisses: rows.filter((row) => row.knownMiss).map((row) => row.id),
     cleanFiles: fs.readdirSync(path.join(root, 'clean')).length,

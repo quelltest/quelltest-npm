@@ -36,11 +36,11 @@ Finding IDs hash the function name and the normalised evidence, not the line num
 - `TODO` — no test could be derived; a note is written instead. A note is not a test.
 - `FLAGGED` — rejected by the security gate (which inspects the generated code, not quoted evidence) or as a duplicate.
 
-Only simple guards (parameters compared with literals, `typeof`, truthiness, joined by `||`) are turned into tests today. `--llm MODULE` lets you plug in your own model for the rest: the module's default export receives the finding and the function source and returns test code, which must pass the same gates. quelltest itself never sends code anywhere.
+Only simple guards (parameters compared with literals, `typeof`, truthiness, joined by `||`) are turned into tests today. `--llm MODULE` lets you plug in your own model for the rest: the module's default export receives the finding and the function source and returns test code, which must pass the same gates. quelltest itself never sends code anywhere. Note that accepted LLM-written tests are executed to verify them: the security gate (allowlisted imports, no `process`/`global`/`eval`/network references) is defence in depth, not a sandbox, so review model output as you would any code.
 
 ### Exit codes
 
-`0` ok · `1` score below `--threshold` (or `verify` did not verify) · `2` usage or runtime error · `3` `--threshold` given but there is no score (no coverage evidence).
+`0` ok · `1` score below `--threshold` · `2` usage or runtime error · `3` `--threshold` given but there is no score (no coverage evidence) · `4` `verify` did not verify the test.
 
 ## Limitations
 
@@ -50,7 +50,7 @@ Only simple guards (parameters compared with literals, `typeof`, truthiness, joi
 
 ## Measuring quelltest itself
 
-`npm run eval` scans `eval/defects/` (known defects from a real code base) and `eval/clean/` (guarded code) and prints recall and false positives; the test suite fails if recall drops below 50% or the clean files produce risk findings.
+`npm run eval` scans `eval/defects/` (known defects from a real code base) and `eval/clean/` (guarded code) and prints recall and false positives; the test suite fails if recall drops below 50% or the clean files produce risk findings. The fixtures were written by the rule author, so treat this as a regression guard rather than an independent benchmark; it reports `recall` over all 18 defects and `detectableRecall` over the 11 that line-level rules can see.
 
 ## Development
 
