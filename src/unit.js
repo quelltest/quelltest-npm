@@ -45,7 +45,12 @@ export function describeModule(text, file) {
     if (statement.type === 'FunctionDeclaration' || statement.type === 'VariableDeclaration') declare(statement, false);
     else if (statement.type === 'ExportNamedDeclaration') {
       declare(statement.declaration, true, statement.leadingComments);
-      for (const spec of statement.specifiers ?? []) if (!statement.source && spec.local) exported.set(spec.exported.name ?? spec.exported.value, spec.local.name);
+      for (const spec of statement.specifiers ?? []) {
+        if (statement.source || !spec.local) continue;
+        const exportName = spec.exported.name ?? spec.exported.value;
+        if (exportName === 'default') defaultExport = spec.local.name;
+        else exported.set(exportName, spec.local.name);
+      }
     } else if (statement.type === 'ExportDefaultDeclaration') {
       declare(statement.declaration, false);
       if (statement.declaration.type === 'FunctionDeclaration' && statement.declaration.id) defaultExport = statement.declaration.id.name;

@@ -148,7 +148,7 @@ export function guardCases(entry, guard, siblings = []) {
 /** Turn `@example fn(1, 2) // => 3` JSDoc lines into equality cases. Only literal arguments/results are used. */
 export function exampleCases(entry) {
   const cases = [];
-  const pattern = new RegExp(`^${entry.name}\\((.*)\\)\\s*(?:\\/\\/\\s*)?(?:=>|→|returns)\\s*(.+?)\\s*;?$`);
+  const pattern = new RegExp(`^${entry.name.replace(/[$()*+.?[\]\\^{|}]/g, '\\$&')}\\((.*)\\)\\s*(?:\\/\\/\\s*)?(?:=>|→|returns)\\s*(.+?)\\s*;?$`);
   for (const comment of entry.comments ?? []) {
     if (comment.type !== 'CommentBlock' || !comment.value.startsWith('*')) continue;
     let inExample = false;
