@@ -20,7 +20,13 @@ const RESPONSE_ROOT = /^(data|res|resp|response|result|results|payload|body|json
 const REQUEST_ROOT = /^(?:req|request)$/;
 const REQUEST_SOURCES = new Set(['body', 'query', 'params']);
 const ASYNC_WRAPPERS = /^(?:asyncHandler|catchAsync|wrapAsync|asyncWrapper|expressAsyncHandler|tryCatch|catchErrors)$/;
-const SANITIZER = /(?:^|\.)(?:String|Number|Boolean|parseInt|parseFloat|encodeURIComponent|encodeURI|basename|normalize)$|escape|sanitiz|validate/i;
+// Which calls neutralise a request value depends on the sink: String() stops operator objects but not "../".
+const SANITIZERS = {
+  any: /(?:^|\.)(?:String|Number|Boolean|parseInt|parseFloat|encodeURIComponent|encodeURI|basename)$|escape|sanitiz|^validate/i,
+  path: /(?:^|\.)basename$|sanitiz|^validate/i,
+  regex: /escape|sanitiz/i,
+  nosql: /(?:^|\.)(?:String|Number|Boolean|parseInt|parseFloat)$|escape|sanitiz|toString$/i,
+};
 const NUMERIC_NAME = /(?:hour|minute|second|count|index|idx|page|limit|offset|amount|total|qty|quantity|price|age|score|size|day|month|year)$/i;
 const NUMERIC_CALL = /^(?:Number|parseInt|parseFloat|Math\.\w+)$/;
 const SECRET_NAME = /(?:secret|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?token|auth[_-]?token)$/i;
@@ -97,12 +103,28 @@ function jsdocTags(comments = []) {
   return tags;
 }
 
+/** Identifier names bound by function parameters or destructuring patterns. */
+function patternNames(patterns) {
+  const names = [];
+  const visit = (pattern) => {
+    if (!pattern) return;
+    if (pattern.type === 'Identifier') names.push(pattern.name);
+    else if (pattern.type === 'AssignmentPattern') visit(pattern.left);
+    else if (pattern.type === 'RestElement') visit(pattern.argument);
+    else if (pattern.type === 'ArrayPattern') pattern.elements.forEach(visit);
+    else if (pattern.type === 'ObjectPattern') pattern.properties.forEach((prop) => visit(prop.value ?? prop.argument));
+    else if (pattern.type === 'TSParameterProperty') visit(pattern.parameter);
+  };
+  patterns.forEach(visit);
+  return names;
+}
+
 function directivesIn(comments) {
   const byLine = new Map();
   let fileWide = false;
   for (const comment of comments ?? []) {
     if (/quell-ignore-file/.test(comment.value)) fileWide = true;
-    const match = /quell-ignore(?!-file)(?:[ \t]+([\w,\- \t]+))?/.exec(comment.value);
+    const match = /quell-ignore(?![\w-])(?:[ \t]+([\w,\- \t]+))?/.exec(comment.value);
     if (!match) continue;
     const rules = (match[1] ?? '').split(/[,\s]+/).filter(Boolean);
     for (const line of [comment.loc.end.line, comment.loc.end.line + 1]) byLine.set(line, [...(byLine.get(line) ?? []), rules]);
@@ -150,52 +172,77 @@ export function scanSource(text, file, options = {}) {
   };
 
   // --- one hop of intra-procedural data flow from req.body / req.query / req.params -------------------------
-  const lookupFrames = (map) => (name) => { for (let i = frames.length - 1; i >= 0; i -= 1) { const value = frames[i][map].get(name); if (value) return value; } return null; };
-  const taintOf = lookupFrames('taint');
+  // A scope entry may hold `null`: that is a shadowing parameter or a reassignment to a clean value.
+  const lookupFrames = (map) => (name) => {
+    for (let i = frames.length - 1; i >= 0; i -= 1) if (frames[i][map].has(name)) return frames[i][map].get(name);
+    return null;
+  };
+  const taintOf = lookupFrames('taint'); // { kind: 'body' | 'query' | 'params', whole: boolean } | null
   const aliasOf = lookupFrames('aliases');
 
-  /** Which request source (`body` | `query` | `params`) a value comes from, or null. Sanitising calls stop the flow. */
-  const taintKind = (node) => {
+  /** The request member chain `req.<source>...` a node is (`{ kind, depth }`: properties after the source), or null. */
+  const requestChain = (node) => {
+    let depth = 0;
+    for (let current = node; current?.type === 'MemberExpression' || current?.type === 'OptionalMemberExpression'; current = current.object) {
+      if (current.object.type === 'Identifier' && REQUEST_ROOT.test(current.object.name) && REQUEST_SOURCES.has(propertyName(current))) return { kind: propertyName(current), depth };
+      depth += 1;
+    }
+    return null;
+  };
+
+  /** Which request source (`body` | `query` | `params`) a value comes from, or null. Calls that sanitise for `rule` stop the flow. */
+  const taintKind = (node, rule = 'any') => {
     if (!node) return null;
+    const recur = (child) => taintKind(child, rule);
     switch (node.type) {
-      case 'Identifier': return taintOf(node.name);
+      case 'Identifier': return taintOf(node.name)?.kind ?? null;
       case 'MemberExpression': case 'OptionalMemberExpression': {
+        const chain = requestChain(node);
+        if (chain) return chain.kind;
         let current = node;
-        while (current.type === 'MemberExpression' || current.type === 'OptionalMemberExpression') {
-          if (current.object.type === 'Identifier' && REQUEST_ROOT.test(current.object.name) && REQUEST_SOURCES.has(propertyName(current))) return propertyName(current);
-          current = current.object;
-        }
-        return current.type === 'Identifier' ? taintOf(current.name) : null;
+        while (current.type === 'MemberExpression' || current.type === 'OptionalMemberExpression') current = current.object;
+        return current.type === 'Identifier' ? taintOf(current.name)?.kind ?? null : null;
       }
-      case 'AwaitExpression': case 'TSAsExpression': case 'TSNonNullExpression': return taintKind(node.argument ?? node.expression);
-      case 'TemplateLiteral': return node.expressions.map(taintKind).find(Boolean) ?? null;
-      case 'BinaryExpression': return node.operator === '+' ? taintKind(node.left) ?? taintKind(node.right) : null;
-      case 'LogicalExpression': return taintKind(node.left) ?? taintKind(node.right);
-      case 'ConditionalExpression': return taintKind(node.consequent) ?? taintKind(node.alternate);
+      case 'AwaitExpression': case 'TSAsExpression': case 'TSNonNullExpression': return recur(node.argument ?? node.expression);
+      case 'TemplateLiteral': return node.expressions.map((expression) => recur(expression)).find(Boolean) ?? null;
+      case 'BinaryExpression': return node.operator === '+' ? recur(node.left) ?? recur(node.right) : null;
+      case 'LogicalExpression': return recur(node.left) ?? recur(node.right);
+      case 'ConditionalExpression': return recur(node.consequent) ?? recur(node.alternate);
       case 'CallExpression': {
         const callee = slice(node.callee, 60);
-        if (callee === 'JSON.parse') return taintKind(node.arguments[0]);
-        if (SANITIZER.test(callee)) return null;
-        if (/\.(?:trim|toLowerCase|toUpperCase|slice|substring|concat)$/.test(callee) && node.callee.type === 'MemberExpression') return taintKind(node.callee.object);
+        if (callee === 'JSON.parse') return recur(node.arguments[0]);
+        if (SANITIZERS[rule].test(callee)) return null;
+        // Coercion and path helpers pass a request value through unchanged as far as traversal is concerned.
+        if (/^(?:String|Number|decodeURIComponent|decodeURI)$|^path\.(?:normalize|join|resolve)$/.test(callee)) return node.arguments.map((argument) => recur(argument)).find(Boolean) ?? null;
+        if (/\.(?:trim|toLowerCase|toUpperCase|slice|substring|concat)$/.test(callee) && node.callee.type === 'MemberExpression') return recur(node.callee.object);
         return null;
       }
       default: return null;
     }
   };
 
-  /** True for a value that carries a whole request object into a write: `req.body`, an alias, `{ ...req.body }`, `{ $set: req.body }`. */
-  const wholeBody = (node) => {
+  /**
+   * True for a value that carries a whole request body into a write: `req.body`, an alias of it, `{ ...req.body }`,
+   * `{ $set: req.body }`. With `nested`, `req.body.changes` counts too (for `Object.assign(doc, req.body.changes)`).
+   * Single fields (destructured values, `req.body.name`) are not whole.
+   */
+  const wholeBody = (node, nested = false) => {
     if (!node) return false;
     if (node.type === 'ObjectExpression') {
-      return node.properties.some((prop) => (prop.type === 'SpreadElement' && wholeBody(prop.argument))
-        || (prop.type === 'ObjectProperty' && ['$set', '$setOnInsert'].includes(prop.key.name ?? prop.key.value) && wholeBody(prop.value)));
+      return node.properties.some((prop) => (prop.type === 'SpreadElement' && wholeBody(prop.argument, nested))
+        || (prop.type === 'ObjectProperty' && ['$set', '$setOnInsert'].includes(prop.key.name ?? prop.key.value) && wholeBody(prop.value, nested)));
     }
-    return taintKind(node) === 'body';
+    if (node.type === 'Identifier') {
+      const entry = taintOf(node.name);
+      return Boolean(entry?.whole && entry.kind === 'body');
+    }
+    const chain = requestChain(node);
+    return Boolean(chain && chain.kind === 'body' && (nested || chain.depth === 0));
   };
 
   const taintedOperand = (object) => object.properties.some((prop) => {
     if (prop.type !== 'ObjectProperty') return false;
-    const kind = taintKind(prop.value);
+    const kind = taintKind(prop.value, 'nosql');
     if (kind === 'body' || kind === 'query') return true;
     return prop.value.type === 'ObjectExpression' && taintedOperand(prop.value);
   });
@@ -203,14 +250,15 @@ export function scanSource(text, file, options = {}) {
   const bind = (target, value) => {
     const frame = frames.at(-1);
     if (target.type === 'Identifier') {
-      const kind = wholeBody(value) ? 'body' : taintKind(value);
-      if (kind) frame.taint.set(target.name, kind);
-      if (value?.type === 'MemberExpression' && RESPONSE_ROOT.test(rootName(value) ?? '') && chainDepth(value) >= 2 && !hasOptional(value)) frame.aliases.set(target.name, true);
+      const kind = wholeBody(value, true) ? 'body' : taintKind(value);
+      frame.taint.set(target.name, kind ? { kind, whole: wholeBody(value, true) } : null);
+      const aliased = value?.type === 'MemberExpression' && RESPONSE_ROOT.test(rootName(value) ?? '') && chainDepth(value) >= 2 && !hasOptional(value);
+      frame.aliases.set(target.name, aliased ? true : null);
     } else if (target.type === 'ObjectPattern' || target.type === 'ArrayPattern') {
       const kind = taintKind(value);
       if (!kind) return;
       const visit = (pattern) => {
-        if (pattern.type === 'Identifier') frame.taint.set(pattern.name, kind);
+        if (pattern.type === 'Identifier') frame.taint.set(pattern.name, { kind, whole: false });
         else if (pattern.type === 'ObjectPattern') pattern.properties.forEach((prop) => visit(prop.value ?? prop.argument));
         else if (pattern.type === 'ArrayPattern') pattern.elements.filter(Boolean).forEach(visit);
         else if (pattern.type === 'AssignmentPattern') visit(pattern.left);
@@ -218,6 +266,13 @@ export function scanSource(text, file, options = {}) {
       };
       visit(target);
     }
+  };
+
+  /** A redirect target with a fixed single-slash prefix stays on this site (`'/users/' + id`); `//host` does not. */
+  const sameSiteTarget = (node) => {
+    const prefix = node.type === 'BinaryExpression' && node.left.type === 'StringLiteral' ? node.left.value
+      : (node.type === 'TemplateLiteral' ? node.quasis[0].value.cooked : '');
+    return prefix.startsWith('/') && !prefix.startsWith('//');
   };
 
   const enclosingStatement = () => [...ancestors].reverse().find((n) => /(?:Statement|Declaration)$/.test(n.type) && n.type !== 'BlockStatement') ?? ast.program;
@@ -274,7 +329,7 @@ export function scanSource(text, file, options = {}) {
     if (mentionsZod && SCHEMA_CALLS.has(property)) emit(node, 'schema');
     if (mentionsZod && calleeText === 'z.object' && !ancestors.slice(0, -1).some((n) => n.type === 'CallExpression' && rootName(n.callee.object ?? n.callee) === 'z')) emit(node, 'schema');
 
-    if ((calleeText === 'Object.assign' || WRITE_METHODS.has(property)) && node.arguments.some(wholeBody)) emit(node, 'risk', { rule: 'mass-assignment' });
+    if ((calleeText === 'Object.assign' || WRITE_METHODS.has(property)) && node.arguments.some((arg) => wholeBody(arg, calleeText === 'Object.assign'))) emit(node, 'risk', { rule: 'mass-assignment' });
     if (/^(?:jwt|jsonwebtoken)\.verify$|^(?:bcrypt|bcryptjs)\.(?:compare|hash)$/.test(calleeText) && !inTryOrWrapper()) emit(node, 'risk', { rule: 'unguarded-call' });
 
     const objectNode = callee.type === 'MemberExpression' ? callee.object : null;
@@ -296,20 +351,20 @@ export function scanSource(text, file, options = {}) {
     }
 
     if (QUERY_METHODS.has(property) && first?.type === 'ObjectExpression' && taintedOperand(first)) emit(node, 'risk', { rule: 'nosql-injection' });
-    if (FS_PATH_SINKS.test(calleeText) && node.arguments.some((arg) => taintKind(arg))) emit(node, 'risk', { rule: 'path-traversal' });
-    if (/^(?:res|response)\.redirect$/.test(calleeText) && node.arguments.some((arg) => taintKind(arg))) emit(node, 'risk', { rule: 'open-redirect' });
+    if (FS_PATH_SINKS.test(calleeText) && node.arguments.some((arg) => taintKind(arg, 'path'))) emit(node, 'risk', { rule: 'path-traversal' });
+    if (/^(?:res|response)\.redirect$/.test(calleeText) && node.arguments.some((arg) => taintKind(arg) && !sameSiteTarget(arg))) emit(node, 'risk', { rule: 'open-redirect' });
     if ((calleeText === 'eval' || calleeText === 'vm.runInNewContext' || calleeText === 'vm.runInThisContext') && first && first.type !== 'StringLiteral') emit(node, 'risk', { rule: 'eval-input' });
     if (calleeText === 'JSON.parse' && taintKind(first) && !inTryOrWrapper()) emit(node, 'risk', { rule: 'unparsed-json' });
-    if (['match', 'search'].includes(property) && first && taintKind(first) && first.type !== 'RegExpLiteral') emit(node, 'risk', { rule: 'regex-injection' });
+    if (['match', 'search'].includes(property) && first && taintKind(first, 'regex') && first.type !== 'RegExpLiteral') emit(node, 'risk', { rule: 'regex-injection' });
   };
 
   const onNew = (node) => {
     const name = node.callee.name;
     const [first] = node.arguments;
-    if (name === 'RegExp' && first && first.type !== 'StringLiteral' && !/escape/i.test(slice(first, 80)) && !SANITIZER.test(slice(first, 80))) emit(node, 'risk', { rule: 'regex-injection' });
+    if (name === 'RegExp' && first && first.type !== 'StringLiteral' && !SANITIZERS.regex.test(slice(first, 80))) emit(node, 'risk', { rule: 'regex-injection' });
     if (name === 'Function' && first && first.type !== 'StringLiteral') emit(node, 'risk', { rule: 'eval-input' });
-    if (name === 'URL' && first && taintKind(first)) emit(node, 'risk', { rule: 'open-redirect' });
-    if (/^[A-Z]/.test(name ?? '') && node.arguments.some(wholeBody)) emit(node, 'risk', { rule: 'mass-assignment' });
+    if (name === 'URL' && first && taintKind(first) && !sameSiteTarget(first)) emit(node, 'risk', { rule: 'open-redirect' });
+    if (/^[A-Z]/.test(name ?? '') && node.arguments.some((arg) => wholeBody(arg))) emit(node, 'risk', { rule: 'mass-assignment' });
   };
 
   const numericLooking = (node) => {
@@ -320,7 +375,7 @@ export function scanSource(text, file, options = {}) {
 
   const onFallback = (node) => {
     const { left, right } = node;
-    if (left.type === 'LogicalExpression') return;
+    if (left.type === 'LogicalExpression' || (left.type === 'MemberExpression' && isProcessEnv(left.object))) return;
     const numericDefault = (right.type === 'NumericLiteral' && right.value !== 0) || (right.type === 'Identifier' && /^[A-Z][A-Z0-9_]*$/.test(right.name) && numericLooking(left));
     const numericChain = left.type === 'MemberExpression' && right.type === 'MemberExpression' && (NUMERIC_NAME.test(propertyName(left) ?? '') || NUMERIC_NAME.test(propertyName(right) ?? ''));
     if ((numericDefault || numericChain) && firstInStatement('falsy-fallback')) emit(node, 'risk', { rule: 'falsy-fallback' });
@@ -329,6 +384,8 @@ export function scanSource(text, file, options = {}) {
   const onSecret = (name, value, node) => {
     if (!name || value?.type !== 'StringLiteral' || value.value.length < 8 || /\s/.test(value.value)) return;
     if (!SECRET_NAME.test(name) || value.value.toLowerCase() === name.toLowerCase() || /^(?:your|change|xxx|<|\$\{|\*+$)/i.test(value.value)) return;
+    // Route paths and i18n/page keys ('/reset-password', 'forgot-password-page') are not secrets.
+    if (value.value.startsWith('/') || /^[a-z]+(?:-[a-z]+)+$/.test(value.value)) return;
     emit(node, 'risk', { rule: 'hard-coded-secret', evidence: `${name} = "…"` });
   };
 
@@ -347,7 +404,7 @@ export function scanSource(text, file, options = {}) {
     if (node.type === 'NewExpression') onNew(node);
 
     if (node.type === 'ObjectProperty' && (node.key.name === '$regex' || node.key.value === '$regex')
-      && !['StringLiteral', 'RegExpLiteral'].includes(node.value.type) && !/escape/i.test(slice(node.value, 80)) && !SANITIZER.test(slice(node.value, 80))) {
+      && !['StringLiteral', 'RegExpLiteral'].includes(node.value.type) && !SANITIZERS.regex.test(slice(node.value, 80))) {
       emit(node, 'risk', { rule: 'regex-injection' });
     }
     if (node.type === 'VariableDeclarator') {
@@ -370,7 +427,15 @@ export function scanSource(text, file, options = {}) {
   const traverse = (node, parent) => {
     ancestors.push(node);
     const isFunction = FUNCTION_TYPES.has(node.type);
-    if (isFunction) frames.push({ name: functionName(node, parent, frames.at(-1).name), node, taint: new Map(), aliases: new Map() });
+    if (isFunction) {
+      const frame = { name: functionName(node, parent, frames.at(-1).name), node, taint: new Map(), aliases: new Map() };
+      // Parameters shadow outer tainted names: `[1].forEach((id) => fs.readFile(id))` is not the request `id`.
+      for (const name of patternNames(node.params)) {
+        frame.taint.set(name, null);
+        frame.aliases.set(name, null);
+      }
+      frames.push(frame);
+    }
     if (isFunction) onFunction(node);
     onVisit(node);
     for (const child of childNodes(node)) traverse(child, node);
