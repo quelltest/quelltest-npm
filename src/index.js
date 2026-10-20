@@ -1,20 +1,29 @@
+import path from 'node:path';
 import { generate } from './generator.js';
 import { verifyGenerated } from './verification.js';
 import { scan } from './scan.js';
+import { score } from './score.js';
+import { attachCoverage, detectCoverage, loadCoverage } from './coverage.js';
+import { changedLines, filterToDiff } from './diff.js';
+import { toSarif } from './sarif.js';
 
-export function score(report) {
-  const total = report.findings.length;
-  const covered = report.findings.filter((item) => item.status === 'WRITTEN').length;
-  const verified = report.findings.filter((item) => item.verified).length;
-  const value = total === 0 ? 100 : Math.round(((covered + verified * 0.5) / total) * 100);
-  return { score: Math.min(100, value), tier: value >= 80 ? 'production-ready' : value >= 60 ? 'review-needed' : 'edge-cases-uncovered', total, covered, verified };
-}
-
+/**
+ * Scan `root` and score it. Coverage evidence comes from `options.coverage` (a file path), or is
+ * auto-detected under `./coverage`; pass `coverage: false` to disable. `options.diff` limits the
+ * report to lines changed since the merge-base with a git ref.
+ */
 export function report(root = '.', options = {}) {
   const result = scan(root, options);
-  result.summary = score(result);
+  const file = options.coverage === false ? null : (options.coverage || detectCoverage());
+  let evidence = { kind: 'none' };
+  if (file) {
+    const coverage = loadCoverage(file);
+    result.findings = attachCoverage(result.findings, coverage);
+    evidence = { kind: coverage.kind, source: path.relative(process.cwd(), file).replaceAll('\\', '/') };
+  }
+  if (options.diff) result.findings = filterToDiff(result.findings, changedLines(options.diff));
+  result.summary = score(result, evidence);
   return result;
 }
 
-export { scan, generate };
-export { verifyGenerated };
+export { scan, score, generate, verifyGenerated, toSarif };

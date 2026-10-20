@@ -152,7 +152,7 @@ export function scanSource(text, file, options = {}) {
     return raw.length > limit ? `${raw.slice(0, limit - 1)}…` : raw;
   };
 
-  const emit = (node, category, { rule = null, evidence = slice(node), suggestion } = {}) => {
+  const emit = (node, category, { rule = null, evidence = slice(node), suggestion, branch = false } = {}) => {
     const frame = frames.at(-1);
     const key = [idFile, frame.name, category, rule ?? '', evidence].join('|');
     const ordinal = ordinals.get(key) ?? 0;
@@ -160,7 +160,8 @@ export function scanSource(text, file, options = {}) {
     const sensitive = SENSITIVE.test(file) || SENSITIVE.test(frame.name);
     findings.push({
       id: crypto.createHash('sha1').update(`${key}|${ordinal}`).digest('hex').slice(0, 12),
-      file, line: node.loc.start.line, column: node.loc.start.column + 1, endLine: node.loc.end.line,
+      file, line: node.loc.start.line, column: node.loc.start.column + 1, endLine: node.loc.end.line, endColumn: node.loc.end.column,
+      ...(branch ? { branch } : {}),
       function: frame.name, category, ...(rule ? { rule } : {}), evidence,
       suggestion: suggestion ?? (rule ? RULES[rule] : SUGGESTIONS[category]),
       risk: BASE_RISK[category] + (sensitive ? 2 : 0),
@@ -187,8 +188,8 @@ export function scanSource(text, file, options = {}) {
     if (someShallow(node.test, isProcessEnv)) return;
     const comparisons = collectShallow(node.test, (n) => n.type === 'BinaryExpression' && (RELATIONAL.has(n.operator) || EQUALITY.has(n.operator)));
     const nullChecks = comparisons.filter((c) => EQUALITY.has(c.operator) && (isNullLike(c.left) || isNullLike(c.right)));
-    if (comparisons.length > nullChecks.length) emit(node.test, 'boundary');
-    if (nullChecks.length) emit(node.test, 'nullish');
+    if (comparisons.length > nullChecks.length) emit(node.test, 'boundary', { branch: true });
+    if (nullChecks.length) emit(node.test, 'nullish', { branch: true });
   };
 
   const onCall = (node) => {
