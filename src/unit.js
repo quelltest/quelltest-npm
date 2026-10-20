@@ -76,7 +76,7 @@ export function describeModule(text, file) {
       }
     }
   }
-  return { ast, style, functions, exported, defaultExport };
+  return { ast, text, style, functions, exported, defaultExport };
 }
 
 /** Find the export name for a local function: `{ kind: 'named' | 'default', name }` or null. */

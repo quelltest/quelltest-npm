@@ -28,6 +28,7 @@ Options:
   --include-tests        scan test files too
   --write                generate: write tests (and TODO notes) to disk
   --destination DIR      generate: output directory (default: tests/quelltest)
+  --include-covered      generate: also generate for candidates your tests already cover
   --verify               generate: run each test and require it to fail on a source mutant
   --llm MODULE           generate: ESM module whose default export writes tests for findings the rules cannot
   --source FILE          verify: source file to mutate (required)
@@ -75,7 +76,7 @@ async function run(argv) {
   const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff };
   const result = report(root, scanOptions);
   if (command === 'generate') {
-    const generateOptions = { write: options.write, destination: options.destination, runner: options.runner, verify: options.verify };
+    const generateOptions = { write: options.write, destination: options.destination, runner: options.runner, verify: options.verify, includeCovered: options['include-covered'] };
     let findings;
     if (options.llm) {
       const { default: llm } = await import(pathToFileURL(path.resolve(options.llm)).href);
@@ -85,7 +86,7 @@ async function run(argv) {
     else {
       const count = (status) => findings.filter((item) => item.status === status).length;
       const tests = count('GENERATED') + count('VERIFIED');
-      console.log(`${options.write ? 'Wrote' : 'Planned'} ${tests} tests (${count('VERIFIED')} verified), ${count('TODO')} TODO notes, ${count('FLAGGED')} flagged`);
+      console.log(`${options.write ? 'Wrote' : 'Planned'} ${tests} tests (${count('VERIFIED')} verified), ${count('TODO')} TODO notes, ${count('FLAGGED')} flagged, ${count('SKIPPED')} already covered`);
       for (const item of findings.filter((entry) => entry.status === 'TODO').slice(0, 5)) console.log(`  TODO ${item.file}:${item.line} — ${item.reason}`);
     }
   } else if (options.sarif) console.log(JSON.stringify(toSarif(result, VERSION), null, 2));

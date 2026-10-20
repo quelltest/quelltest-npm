@@ -219,6 +219,74 @@ test('export { f as default } is treated as a default export', async () => {
   assert.deepEqual(exportOf(module, 'f'), { kind: 'default', name: 'f' });
 });
 
+test('route handlers get request skeletons derived from their guards', () => {
+  const p = project({
+    'src/routes.js': [
+      'const router = require("express").Router();',
+      'router.post("/users", async (req, res) => {',
+      '  const { name, age } = req.body;',
+      '  if (!name) return res.status(400).json({ error: "name required" });',
+      '  if (typeof age !== "number") return res.status(422).json({ error: "age" });',
+      '  if (age < 18) return res.status(403).json({ error: "minor" });',
+      '  res.json({ ok: true });',
+      '});',
+      'module.exports = router;',
+      '',
+    ].join('\n'),
+  });
+  const results = generate(report(p.src, { coverage: false }), options(p, { write: true }));
+  const withRequests = results.find((item) => item.requests?.length);
+  assert.ok(withRequests, JSON.stringify(results.map((r) => r.reason)));
+  const text = withRequests.requests.join('\n');
+  assert.match(text, /POST \/users with body without `name` -> expect 400/);
+  assert.match(text, /body\.age = a non-number value -> expect 422/);
+  assert.match(text, /body\.age = 17/);
+  assert.match(text, /body\.age = 18/);
+  const note = fs.readFileSync(withRequests.output, 'utf8');
+  assert.match(note, /## Suggested requests/);
+  assert.match(note, /not a test/);
+});
+
+test('TODO reasons say how to unblock: export, extract, or name the unsupported expression', () => {
+  const p = project({
+    'src/hints.mjs': [
+      'function hidden(n) {',
+      '  if (n < 1) throw new Error("low");',
+      '}',
+      'export function complex(a) {',
+      '  if (a.x && a.y > 2) throw new Error("bad");',
+      '}',
+      'export function outer() {',
+      '  function inner(n) {',
+      '    if (n < 1) throw new Error("low");',
+      '  }',
+      '  return inner;',
+      '}',
+      'export const cb = [1, 2].map((n) => {',
+      '  if (n > 5) throw new Error("big");',
+      '  return n;',
+      '});',
+      '',
+    ].join('\n'),
+  });
+  const reasons = generate(report(p.src, { coverage: false }), options(p)).map((item) => item.reason);
+  assert.ok(reasons.some((r) => /`hidden` is not exported: add `export`/.test(r)), reasons.join('\n'));
+  assert.ok(reasons.some((r) => /`a\.x && a\.y > 2`|not a comparison of a parameter/.test(r)), reasons.join('\n'));
+  assert.ok(reasons.some((r) => /`inner` is declared inside another function: extract it/.test(r)), reasons.join('\n'));
+  assert.ok(reasons.some((r) => /anonymous callback: extract the guard/.test(r)), reasons.join('\n'));
+});
+
+test('findings already covered by real tests are skipped unless includeCovered is set', () => {
+  const p = project({ 'src/pay.mjs': PAY });
+  const result = report(p.src, { coverage: false });
+  const covered = { ...result, findings: result.findings.map((item) => ({ ...item, covered: item.line === 2 })) };
+  const skipped = generate(covered, options(p, { write: true }));
+  assert.ok(skipped.some((item) => item.status === 'SKIPPED' && /already covered/.test(item.reason)));
+  assert.ok(skipped.filter((item) => item.status === 'SKIPPED').every((item) => item.output === null));
+  const all = generate(covered, options(p, { includeCovered: true }));
+  assert.ok(all.every((item) => item.status !== 'SKIPPED'));
+});
+
 test('examples work for function names containing regex characters', () => {
   const p = project({ 'src/dollar.mjs': '/**\n * @example\n * $add(1, 2) // => 3\n */\nexport function $add(a, b) {\n  return a + b;\n}\n' });
   const results = generate(report(p.src, { coverage: false }), options(p, { verify: true }));
