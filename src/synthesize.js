@@ -103,12 +103,21 @@ function consequentOf(guard) {
  * Cases marked `optional` only assert that nothing else threw; they are dropped first if a run disagrees.
  * Returns null when the guard is not simple enough to reason about statically.
  */
-export function guardCases(entry, guard, siblings = []) {
+export function guardCases(entry, guard, siblings = [], why = {}) {
   const params = new Map(entry.params.filter((p) => p.name).map((p) => [p.name, p]));
-  const terms = splitOr(guard.test).map((node) => termOf(node, params));
-  if (!terms.length || terms.some((term) => !term)) return null;
+  const sourceOf = (node) => (why.text ? why.text.slice(node.start, node.end).replace(/\s+/g, ' ').trim().slice(0, 80) : 'a term');
+  const nodes = splitOr(guard.test);
+  const terms = nodes.map((node) => termOf(node, params));
+  const unsupported = nodes.find((node, index) => !terms[index]);
+  if (unsupported) {
+    why.reason = `\`${sourceOf(unsupported)}\` is not a comparison of a parameter with a literal, a typeof check or a truthiness check`;
+    return null;
+  }
   const consequent = consequentOf(guard);
-  if (!consequent) return null;
+  if (!consequent) {
+    why.reason = 'the guard body does not start with `throw new Error(...)` or `return <literal>`';
+    return null;
+  }
   const byParam = new Map();
   for (const term of terms) byParam.set(term.param, [...(byParam.get(term.param) ?? []), term]);
 

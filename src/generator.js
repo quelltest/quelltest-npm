@@ -3,6 +3,7 @@ import path from 'node:path';
 import { childNodes, parseSource } from './ast.js';
 import { allGuards, describeModule, exportOf, guardFor } from './unit.js';
 import { exampleCases, guardCases } from './synthesize.js';
+import { renderRequests, requestCases, routeFor } from './routes.js';
 import { detectRunner, renderTest, testExtension, RUNNERS } from './runner.js';
 import { verifyGenerated } from './verification.js';
 
@@ -53,34 +54,59 @@ export function originalityGate(source, existing = '') {
   return { passed, reason: passed ? null : 'generated test is empty or already present' };
 }
 
-function todoNote(finding, reason) {
+function todoNote(finding, reason, requests = []) {
+  const suggested = requests.length ? `\n## Suggested requests\n\n${requests.map((line) => `- ${line}`).join('\n')}\n` : '';
   return `# TODO: ${finding.category}${finding.rule ? ` (${finding.rule})` : ''} in \`${finding.function}\`\n\n`
-    + `- Location: \`${finding.file}:${finding.line}\`\n- Suggestion: ${finding.suggestion}\n- Evidence: \`${finding.evidence.replaceAll('`', "'")}\`\n- Why no test was generated: ${reason}\n\n`
-    + 'This is a note, not a test: nothing here executes or asserts anything.\n';
+    + `- Location: \`${finding.file}:${finding.line}\`\n- Suggestion: ${finding.suggestion}\n- Evidence: \`${finding.evidence.replaceAll('`', "'")}\`\n- Why no test was generated: ${reason}\n`
+    + `${suggested}\nThis is a note, not a test: nothing here executes or asserts anything.\n`;
 }
 
 function toPosix(file) {
   return file.split(path.sep).join('/');
 }
 
-/** Work out what can be tested for one finding, statically. Returns `{ plan }` or `{ reason }`. */
+function declaredAnywhere(module, name) {
+  for (const [node] of walk(module.ast.program)) {
+    if (node.type === 'FunctionDeclaration' && node.id?.name === name) return true;
+    if (node.type === 'VariableDeclarator' && node.id?.name === name && /Function/.test(node.init?.type ?? '')) return true;
+  }
+  return false;
+}
+
+/** Work out what can be tested for one finding, statically. Returns `{ plan }` or `{ reason, requests? }`. */
 function plan(finding, cwd, cache) {
   const sourceFile = path.resolve(cwd, finding.file);
   if (!cache.has(sourceFile)) cache.set(sourceFile, describeModule(fs.readFileSync(sourceFile, 'utf8'), sourceFile));
   const module = cache.get(sourceFile);
   if (!module) return { reason: 'source file could not be parsed' };
-  const entry = module.functions.get(finding.function);
-  if (!entry) return { reason: 'finding is not inside a top-level named function' };
-  const exportInfo = exportOf(module, finding.function);
-  if (!exportInfo) return { reason: 'function is not exported, so a test cannot call it' };
+  const name = finding.function;
+  const entry = module.functions.get(name);
+  if (!entry) {
+    const route = routeFor(module.ast, finding);
+    if (route) {
+      const requests = renderRequests(requestCases(route));
+      return {
+        reason: `inside route handler ${route.method} ${route.path}, which cannot be called directly: ${requests.length ? `${requests.length} request case(s) are derived from its guards (see "Suggested requests"); ` : ''}extract the logic into a named, exported function to get a generated unit test`,
+        requests,
+      };
+    }
+    if (name === '<anonymous>' || name === '<module>' || /^[A-Z]+ /.test(name)) return { reason: 'inside an anonymous callback: extract the guard into a named function at module scope and export it' };
+    if (declaredAnywhere(module, name)) return { reason: `\`${name}\` is declared inside another function: extract it to module scope and export it to test it` };
+    return { reason: `\`${name}\` is not a top-level function declaration or arrow function, so its guards cannot be called from a test` };
+  }
+  const exportInfo = exportOf(module, name);
+  if (!exportInfo) return { reason: `\`${name}\` is not exported: add \`export\` (or add it to module.exports) so a test can import it` };
+  const why = { text: module.text };
   let cases = null;
   if (['boundary', 'nullish', 'throws'].includes(finding.category)) {
     const guard = guardFor(entry.node, finding);
-    cases = guard ? guardCases(entry, guard, allGuards(entry.node)) : null;
+    if (!guard) why.reason = 'no `if` guard was found at this location';
+    cases = guard ? guardCases(entry, guard, allGuards(entry.node), why) : null;
     if (!cases) cases = exampleCases(entry);
   } else if (finding.category === 'jsdoc') cases = exampleCases(entry);
+  else if (/\.[jt]sx$/.test(finding.file) || /^[A-Z]/.test(name)) return { reason: `\`${name}\` looks like a React component: test it with React Testing Library, or extract the logic into a plain exported function` };
   else return { reason: `no executable test rule for ${finding.rule ?? finding.category} findings yet` };
-  if (!cases?.length) return { reason: 'guard is too complex to derive inputs from statically (and no literal @example)' };
+  if (!cases?.length) return { reason: `${why.reason ?? 'the guard could not be analysed'} (and there is no literal \`@example\` to use)` };
   return { plan: { sourceFile, module, entry, exportInfo, cases } };
 }
 
@@ -169,7 +195,7 @@ function candidateFor(finding, planned, options) {
  * Generate tests for findings. A finding becomes a real test (it imports the unit, calls it and asserts)
  * only when its guard can be analysed statically; everything else becomes a TODO note, never a placeholder test.
  *
- * Statuses: GENERATED (test written/planned, not yet run), VERIFIED (passed on the original code and failed on a
+ * Statuses: SKIPPED (already covered by existing tests), GENERATED (test written/planned, not yet run), VERIFIED (passed on the original code and failed on a
  * source mutant; needs `verify: true`), TODO (note only), FLAGGED (rejected by the security or originality gate).
  * Options: destination, write, runner, verify, existing, cwd.
  */
@@ -180,9 +206,13 @@ export function generate(report, rawOptions = {}) {
   const results = [];
   for (const finding of report.findings) {
     const base = { ...finding, kind: 'todo', verified: false, gates: { security: null, originality: null, correctCode: 'PENDING', injectedBug: 'PENDING' }, output: null };
+    if (finding.covered && !options.includeCovered) {
+      results.push({ ...base, status: 'SKIPPED', reason: 'already covered by existing tests (use includeCovered to generate anyway)' });
+      continue;
+    }
     const planned = plan(finding, options.cwd, cache);
     if (!planned.plan) {
-      results.push(todo(base, planned.reason, options));
+      results.push(todo(base, planned.reason, options, planned.requests));
       continue;
     }
     const candidate = candidateFor(finding, planned.plan, options);
@@ -193,14 +223,14 @@ export function generate(report, rawOptions = {}) {
   return results;
 }
 
-function todo(base, reason, options) {
+function todo(base, reason, options, requests = []) {
   let output = null;
   if (options.write) {
     output = path.join(options.destination, `${base.id}.todo.md`);
     fs.mkdirSync(options.destination, { recursive: true });
-    fs.writeFileSync(output, todoNote(base, reason), 'utf8');
+    fs.writeFileSync(output, todoNote(base, reason, requests), 'utf8');
   }
-  return { ...base, status: 'TODO', kind: 'todo', verified: false, reason, output };
+  return { ...base, status: 'TODO', kind: 'todo', verified: false, reason, output, ...(requests.length ? { requests } : {}) };
 }
 
 /**

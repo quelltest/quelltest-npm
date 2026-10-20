@@ -2,16 +2,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { report, generate, generateWithLlm, toSarif, verifyGenerated } from './index.js';
+import { report, generate, generateWithLlm, scan, toSarif, verifyGenerated } from './index.js';
+import { renderHandoff } from './handoff.js';
+import { gate, gateSarif } from './gate.js';
 import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from · 4 verify: test not verified
-const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3, notVerified: 4 };
+// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from · 4 verify: test not verified · 5 gate: weakened tests found
+const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3, notVerified: 4, weakened: 5 };
 
 const HELP = `Usage: quell <${COMMANDS.join('|')}> [PATH] [options]
        quell verify TEST_FILE --source FILE [--function NAME] [--runner NAME]
+       quell gate --diff REF [--strict] [--json|--sarif]
+       quell mcp                       (MCP server on stdio: tools find, verify, gate)
 
 PATH may be a directory or a single file (default: .).
 
@@ -28,10 +32,16 @@ Options:
   --include-tests        scan test files too
   --write                generate: write tests (and TODO notes) to disk
   --destination DIR      generate: output directory (default: tests/quelltest)
+  --include-covered      generate: also generate for candidates your tests already cover
   --verify               generate: run each test and require it to fail on a source mutant
   --llm MODULE           generate: ESM module whose default export writes tests for findings the rules cannot
   --source FILE          verify: source file to mutate (required)
   --function NAME        verify: only mutate this function (repeatable)
+  --findings             verify: aim mutation at lines the scanner flagged
+  --min-score N          verify: also require N% of mutants killed
+  --handoff FILE         verify: write surviving mutants as Markdown an agent can act on
+  --in-place             verify: mutate the source file itself instead of a temporary copy
+  --strict               gate: also fail on 'expected value changed' review items
   --runner NAME          generate/verify: node, jest, vitest or mocha (generate default: detected from package.json)
   -h, --help | -v, --version`;
 
@@ -55,19 +65,45 @@ function printScore(result) {
 
 function runVerify(testFile, options) {
   if (!options.source) throw new UsageError('verify requires --source FILE');
-  const result = verifyGenerated(null, { sourceFile: options.source, testPath: testFile, runner: options.runner, functions: options.function });
+  // --findings aims mutation at the lines the scanner flagged instead of the whole file.
+  const lines = options.findings ? scan(options.source, { includeTests: true }).findings.map((item) => [item.line, item.endLine]) : undefined;
+  const result = verifyGenerated(null, {
+    sourceFile: options.source, testPath: testFile, runner: options.runner, functions: options.function, lines,
+    inPlace: options['in-place'], minScore: options['min-score'],
+  });
+  if (options.handoff) fs.writeFileSync(options.handoff, renderHandoff(result, { sourceText: fs.existsSync(options.source) ? fs.readFileSync(options.source, 'utf8') : '' }), 'utf8');
   if (options.json) console.log(JSON.stringify(result, null, 2));
   else {
-    console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)` : `Not verified: ${result.reason}`);
-    for (const mutant of result.mutants.filter((item) => !item.killed)) console.log(`  survived: ${mutant.description}`);
+    const suffix = `${result.isolation ? ` [${result.isolation}]` : ''}${result.ignored ? `, ${result.ignored} ignored` : ''}${result.inconclusive ? `, ${result.inconclusive} inconclusive` : ''}`;
+    console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)${suffix}` : `Not verified: ${result.reason}${suffix}`);
+    for (const mutant of result.mutants.filter((item) => item.outcome === 'survived')) console.log(`  survived: ${mutant.description}`);
+    if (options.handoff) console.log(`Handoff written to ${options.handoff}`);
   }
   return result.verified ? EXIT.ok : EXIT.notVerified;
+}
+
+function runGate(options) {
+  if (!options.diff) throw new UsageError('gate requires --diff REF');
+  const result = gate(options.diff, { strict: options.strict });
+  if (options.sarif) console.log(JSON.stringify(gateSarif(result, VERSION), null, 2));
+  else if (options.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    console.log(result.ok ? `Gate passed: ${result.checked} changed test file(s) checked, no weakened tests` : `Gate failed: ${result.issues.length} issue(s) in ${result.checked} changed test file(s)`);
+    for (const item of result.issues) console.log(`  ${item.severity === 'error' ? '✖' : '?'} ${item.file} :: ${item.test} — ${item.message}`);
+  }
+  return result.ok ? EXIT.ok : EXIT.weakened;
 }
 
 async function run(argv) {
   const { command, root, hasPath, options } = parseArgs(argv);
   if (options.help) { console.log(HELP); return EXIT.ok; }
   if (options.version) { console.log(VERSION); return EXIT.ok; }
+  if (command === 'gate') return runGate(options);
+  if (command === 'mcp') {
+    const { serve } = await import('./mcp.js');
+    await serve();
+    return EXIT.ok;
+  }
   if (command === 'verify') {
     if (!hasPath) throw new UsageError('verify requires a TEST_FILE');
     return runVerify(root, options);
@@ -75,7 +111,7 @@ async function run(argv) {
   const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff };
   const result = report(root, scanOptions);
   if (command === 'generate') {
-    const generateOptions = { write: options.write, destination: options.destination, runner: options.runner, verify: options.verify };
+    const generateOptions = { write: options.write, destination: options.destination, runner: options.runner, verify: options.verify, includeCovered: options['include-covered'] };
     let findings;
     if (options.llm) {
       const { default: llm } = await import(pathToFileURL(path.resolve(options.llm)).href);
@@ -85,7 +121,7 @@ async function run(argv) {
     else {
       const count = (status) => findings.filter((item) => item.status === status).length;
       const tests = count('GENERATED') + count('VERIFIED');
-      console.log(`${options.write ? 'Wrote' : 'Planned'} ${tests} tests (${count('VERIFIED')} verified), ${count('TODO')} TODO notes, ${count('FLAGGED')} flagged`);
+      console.log(`${options.write ? 'Wrote' : 'Planned'} ${tests} tests (${count('VERIFIED')} verified), ${count('TODO')} TODO notes, ${count('FLAGGED')} flagged, ${count('SKIPPED')} already covered`);
       for (const item of findings.filter((entry) => entry.status === 'TODO').slice(0, 5)) console.log(`  TODO ${item.file}:${item.line} — ${item.reason}`);
     }
   } else if (options.sarif) console.log(JSON.stringify(toSarif(result, VERSION), null, 2));

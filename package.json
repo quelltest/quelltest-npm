@@ -1,7 +1,7 @@
 {
   "name": "quelltest",
-  "version": "0.2.0",
-  "description": "Offline-first edge-case discovery and production-readiness scoring for JavaScript and TypeScript projects.",
+  "version": "0.3.0",
+  "description": "Free, offline gate for AI-written tests: proves tests fail when the code is wrong (mutation verification), detects weakened tests in a change, and finds untested risky edges in JavaScript and TypeScript.",
   "type": "module",
   "bin": {
     "quell": "./src/cli.js"
@@ -15,7 +15,9 @@
   },
   "files": [
     "src",
+    "docs",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE"
   ],
@@ -23,7 +25,7 @@
     "test": "node --test",
     "eval": "node scripts/eval.mjs",
     "test:verify": "node scripts/verification-smoke.mjs",
-    "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check src/scan.js && node --check src/files.js && node --check src/unit.js && node --check src/synthesize.js && node --check src/runner.js && node --check src/ast.js && node --check src/backup.js && node --check src/mutate.js && node --check src/score.js && node --check src/diff.js && node --check src/sarif.js && node --check src/coverage.js && node --check src/cli-args.js && node --check scripts/verification-smoke.mjs && node --check scripts/eval.mjs",
+    "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check src/scan.js && node --check src/files.js && node --check src/unit.js && node --check src/synthesize.js && node --check src/runner.js && node --check src/ast.js && node --check src/backup.js && node --check src/handoff.js && node --check src/gate.js && node --check src/mcp.js && node --check src/routes.js && node --check src/mutate.js && node --check src/score.js && node --check src/diff.js && node --check src/sarif.js && node --check src/coverage.js && node --check src/cli-args.js && node --check scripts/verification-smoke.mjs && node --check scripts/eval.mjs",
     "pack:check": "npm pack --dry-run",
     "test:ci": "npm test && npm run test:verify && npm run check && npm run pack:check"
   },
@@ -31,15 +33,34 @@
     "node": ">=20"
   },
   "keywords": [
-    "testing",
-    "test-generation",
+    "ai-generated-tests",
+    "claude-code",
+    "code-review",
     "edge-cases",
+    "mcp",
     "mutation-testing",
-    "typescript",
-    "production-readiness"
+    "production-readiness",
+    "sarif",
+    "test-generation",
+    "test-quality",
+    "testing",
+    "typescript"
   ],
   "license": "Apache-2.0",
   "dependencies": {
     "@babel/parser": "^7.26.2"
-  }
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "mocha": "^10.8.2",
+    "vitest": "^2.1.8"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quelltest/quelltest-npm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/quelltest/quelltest-npm/issues"
+  },
+  "homepage": "https://github.com/quelltest/quelltest-npm#readme"
 }

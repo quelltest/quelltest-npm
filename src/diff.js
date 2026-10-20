@@ -56,3 +56,27 @@ export function filterToDiff(findings, ranges, cwd = process.cwd()) {
     return spans?.some(([start, end]) => finding.line <= end && finding.endLine >= start);
   });
 }
+
+/**
+ * Files changed between the merge-base of `ref` and the working tree, with their content at the base.
+ * Returns `[{ status: 'M' | 'D' | 'A', file, root, base }]`: `file` is relative to the repository root and `base` is the
+ * text at the merge-base (null for added files). A rename or copy is reported as `M` against the old path's content, so
+ * moving a test file is not a deletion. `include(file)` limits which files have their base content read (a binary
+ * or a submodule elsewhere in the diff must not abort the run).
+ */
+export function changedFiles(ref, cwd = process.cwd(), include = () => true) {
+  if (!ref || ref.startsWith('-')) throw new Error(`invalid git ref: ${ref}`);
+  const root = git(['rev-parse', '--show-toplevel'], cwd).trim();
+  const base = git(['merge-base', ref, 'HEAD'], cwd).trim();
+  const entries = new Map();
+  for (const line of git(['diff', '--name-status', '--find-renames', '--no-ext-diff', base], cwd).split(/\r?\n/).filter(Boolean)) {
+    const [status, first, second] = line.split('\t');
+    if (status[0] === 'R' || status[0] === 'C') entries.set(second, { status: 'M', basePath: first });
+    else entries.set(first, { status: status[0], basePath: first });
+  }
+  for (const name of git(['ls-files', '--others', '--exclude-standard'], root).split(/\r?\n/).filter(Boolean)) entries.set(name, { status: 'A', basePath: null });
+  return [...entries].filter(([file]) => include(file)).map(([file, { status, basePath }]) => ({
+    status, file, root,
+    base: status === 'A' ? null : git(['show', `${base}:${basePath}`], root),
+  }));
+}

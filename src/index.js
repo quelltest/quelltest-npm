@@ -6,6 +6,8 @@ import { score } from './score.js';
 import { attachCoverage, detectCoverage, loadCoverage } from './coverage.js';
 import { changedLines, filterToDiff } from './diff.js';
 import { toSarif } from './sarif.js';
+import { gate, gateSarif } from './gate.js';
+import { renderHandoff } from './handoff.js';
 
 /**
  * Scan `root` and score it. Coverage evidence comes from `options.coverage` (a file path), or is
@@ -26,4 +28,4 @@ export function report(root = '.', options = {}) {
   return result;
 }
 
-export { scan, score, generate, generateWithLlm, verifyGenerated, toSarif };
+export { scan, score, generate, generateWithLlm, verifyGenerated, toSarif, gate, gateSarif, renderHandoff };

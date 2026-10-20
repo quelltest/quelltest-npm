@@ -49,3 +49,14 @@ jobs:
             const existing = comments.find((comment) => comment.body?.includes(marker));
             if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+      # Last, so the report, artifact and comment are published even when the gate fails.
+      - name: Gate against weakened tests
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set +e
+          node src/cli.js gate --diff "origin/$BASE_REF" > quelltest-gate.txt
+          code=$?
+          { echo '### Test gate'; echo '```'; cat quelltest-gate.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat quelltest-gate.txt
+          exit "$code"
