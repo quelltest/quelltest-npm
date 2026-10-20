@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 
-export const COMMANDS = ['find', 'score', 'generate', 'verify'];
+export const COMMANDS = ['find', 'score', 'generate', 'verify', 'gate', 'mcp'];
 
-const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify', 'include-covered', 'in-place', 'findings']);
+const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify', 'include-covered', 'in-place', 'findings', 'strict']);
 const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm', 'min-score', 'handoff']);
 const REPEATABLE = new Set(['include', 'exclude', 'function']);
 const ALIASES = { ignore: 'exclude', h: 'help', v: 'version' };

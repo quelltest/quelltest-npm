@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { scan } from '../src/index.js';
+import { scan, verifyGenerated } from '../src/index.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'eval');
 
@@ -35,9 +35,37 @@ export function evaluate() {
   };
 }
 
+/**
+ * Measure the verifier itself: for each case in eval/gate, the `strong` test must be accepted and every `weak-*` test
+ * (tautology, literal-only, no assertion, wrong target, happy-path only) must be rejected at a 60% mutation-score floor.
+ */
+export function evaluateGate({ minScore = 60 } = {}) {
+  const dir = path.join(root, 'gate');
+  const rows = [];
+  for (const name of fs.readdirSync(dir).sort()) {
+    const caseDir = path.join(dir, name);
+    for (const file of fs.readdirSync(caseDir).filter((entry) => entry.endsWith('.check.mjs')).sort()) {
+      const expected = file.startsWith('strong') ? 'accept' : 'reject';
+      const result = verifyGenerated(null, { sourceFile: path.join(caseDir, 'unit.mjs'), testPath: path.join(caseDir, file), minScore });
+      rows.push({ case: name, test: file.replace('.check.mjs', ''), expected, verified: result.verified, score: result.mutationScore, reason: result.reason, correct: result.verified === (expected === 'accept') });
+    }
+  }
+  const strong = rows.filter((row) => row.expected === 'accept');
+  const weak = rows.filter((row) => row.expected === 'reject');
+  return {
+    minScore,
+    strong: strong.length, strongAccepted: strong.filter((row) => row.verified).length,
+    weak: weak.length, weakRejected: weak.filter((row) => !row.verified).length,
+    accuracy: rows.filter((row) => row.correct).length / rows.length,
+    wrong: rows.filter((row) => !row.correct).map((row) => `${row.case}/${row.test} (${row.verified ? 'accepted' : 'rejected'}, score ${row.score}): ${row.reason ?? ''}`),
+    rows,
+  };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const result = evaluate();
-  console.log(JSON.stringify(result, null, 2));
+  const gate = evaluateGate();
+  console.log(JSON.stringify({ ...result, gate: { ...gate, rows: undefined } }, null, 2));
   const minimum = Number(process.argv[2] ?? 0.5);
-  if (result.recall < minimum || result.noise.length) process.exitCode = 1;
+  if (result.recall < minimum || result.noise.length || gate.wrong.length) process.exitCode = 1;
 }

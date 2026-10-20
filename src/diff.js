@@ -56,3 +56,24 @@ export function filterToDiff(findings, ranges, cwd = process.cwd()) {
     return spans?.some(([start, end]) => finding.line <= end && finding.endLine >= start);
   });
 }
+
+/**
+ * Files changed between the merge-base of `ref` and the working tree, with their content at the base.
+ * Returns `[{ status: 'M' | 'D' | 'A', file, base }]` where `file` is relative to the repository root and `base` is the
+ * text at the merge-base (null for added files).
+ */
+export function changedFiles(ref, cwd = process.cwd()) {
+  if (!ref || ref.startsWith('-')) throw new Error(`invalid git ref: ${ref}`);
+  const root = git(['rev-parse', '--show-toplevel'], cwd).trim();
+  const base = git(['merge-base', ref, 'HEAD'], cwd).trim();
+  const entries = new Map();
+  for (const line of git(['diff', '--name-status', '--no-renames', '--no-ext-diff', base], cwd).split(/\r?\n/).filter(Boolean)) {
+    const [status, ...rest] = line.split('\t');
+    entries.set(rest.join('\t'), status[0]);
+  }
+  for (const name of git(['ls-files', '--others', '--exclude-standard'], root).split(/\r?\n/).filter(Boolean)) entries.set(name, 'A');
+  return [...entries].map(([file, status]) => ({
+    status, file, root,
+    base: status === 'A' ? null : git(['show', `${base}:${file}`], root),
+  }));
+}
