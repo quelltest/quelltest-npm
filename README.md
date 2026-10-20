@@ -28,4 +28,4 @@ npm run test:ci
 
 The CI workflow runs Node checks on Node 20, 22 and 24 (plus Windows and macOS on Node 22), and the PR report workflow runs quelltest on every pull request and posts the result to the job summary and a PR comment. Ruff and Flake8 are conditional quality jobs: they run only when Python files are added, so the npm package does not pull in unrelated Python tooling while mixed-language contributions remain covered.
 
-MIT licensed. Maintained by Shashank Bindal.
+Licensed under the [Apache License 2.0](LICENSE). Maintained by Shashank Bindal.

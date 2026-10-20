@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
+/** Neutralise markdown/HTML from analysed source (thrown messages, file names) before it lands in a PR comment. */
+export function escapeMarkdown(text) {
+  return String(text).replace(/[\r\n]+/g, ' ').replace(/[&<>`|\\*_[\]]/g, (char) => `&#${char.charCodeAt(0)};`);
+}
+
 /** Render a quelltest JSON report as a Markdown PR comment. */
 export function renderMarkdown(report, limit = 10) {
   const findings = report.findings ?? [];
@@ -14,7 +19,7 @@ export function renderMarkdown(report, limit = 10) {
     for (const [category, count] of [...counts].sort((a, b) => b[1] - a[1])) lines.push(`| ${category} | ${count} |`);
     lines.push('');
     lines.push(`<details><summary>Top ${Math.min(limit, findings.length)} candidates</summary>`, '');
-    for (const item of findings.slice(0, limit)) lines.push(`- \`${item.file}:${item.line}\` **${item.category}** — ${item.suggestion}`);
+    for (const item of findings.slice(0, limit)) lines.push(`- <code>${escapeMarkdown(`${item.file}:${item.line}`)}</code> <b>${escapeMarkdown(item.category)}</b> — ${escapeMarkdown(item.suggestion)}`);
     lines.push('', '</details>', '');
   }
   lines.push('_Candidates are review hints, not proof of defects._');

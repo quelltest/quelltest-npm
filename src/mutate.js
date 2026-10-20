@@ -7,6 +7,22 @@ const OPERATOR_SWAPS = {
   '&&': '||', '||': '&&',
 };
 
+/** Index of `operator` between two operands, skipping comments that may sit in the gap; -1 if absent. */
+export function findOperator(text, from, to, operator) {
+  for (let i = from; i < to; i += 1) {
+    if (text.startsWith('/*', i)) {
+      const close = text.indexOf('*/', i + 2);
+      if (close < 0 || close >= to) return -1;
+      i = close + 1;
+    } else if (text.startsWith('//', i)) {
+      const newline = text.indexOf('\n', i);
+      if (newline < 0 || newline >= to) return -1;
+      i = newline;
+    } else if (text.startsWith(operator, i)) return i;
+  }
+  return -1;
+}
+
 /**
  * Enumerate deterministic source mutants: flipped comparison/arithmetic/logical operators,
  * removed guards (`if (c)` -> `if (false)`) and removed throws. Each mutant is a text splice.
@@ -26,10 +42,8 @@ export function mutants(text, file, options = {}) {
     const isFunction = FUNCTION_TYPES.has(node.type);
     if (isFunction) frames.push({ name: functionName(node, parent, frames.at(-1).name) });
     if ((node.type === 'BinaryExpression' || node.type === 'LogicalExpression') && OPERATOR_SWAPS[node.operator]) {
-      const between = text.slice(node.left.end, node.right.start);
-      const offset = between.indexOf(node.operator);
-      if (offset >= 0) {
-        const start = node.left.end + offset;
+      const start = findOperator(text, node.left.end, node.right.start, node.operator);
+      if (start >= 0) {
         add(node, start, start + node.operator.length, OPERATOR_SWAPS[node.operator], `${node.operator} -> ${OPERATOR_SWAPS[node.operator]}`);
       }
     }

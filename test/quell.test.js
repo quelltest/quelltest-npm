@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { report, score } from '../src/index.js';
 import { parseIstanbul, parseLcov, attachCoverage } from '../src/coverage.js';
-import { parseDiff, filterToDiff } from '../src/diff.js';
+import { parseDiff, filterToDiff, canonicalPath } from '../src/diff.js';
 
 test('finds deterministic edge-case evidence without executing source', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'quelltest-'));
@@ -57,7 +57,30 @@ test('istanbul: branch findings need every side taken; unknown files are uncover
 
 test('parseDiff and filterToDiff map changed ranges to findings', () => {
   const ranges = parseDiff('+++ b/src/a.js\n@@ -1,0 +2,3 @@\n+x\n@@ -9 +20 @@\n+y\n@@ -5,2 +0,0 @@\n', '/repo');
-  assert.deepEqual(ranges.get(path.resolve('/repo', 'src/a.js')), [[2, 4], [20, 20]]);
+  assert.deepEqual(ranges.get(canonicalPath(path.resolve('/repo', 'src/a.js'))), [[2, 4], [20, 20]]);
   const findings = [{ file: 'src/a.js', line: 3, endLine: 3 }, { file: 'src/a.js', line: 10, endLine: 10 }];
   assert.equal(filterToDiff(findings, ranges, '/repo').length, 1);
+});
+
+test('lcov coverage matches indented findings by line, and relative SF paths resolve against the lcov file', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'quelltest-lcov-'));
+  fs.mkdirSync(path.join(dir, 'coverage'));
+  fs.writeFileSync(path.join(dir, 'a.js'), 'function f(x) {\n  if (x < 0) {\n    throw new Error("neg");\n  }\n  return x;\n}\n');
+  fs.writeFileSync(path.join(dir, 'coverage', 'lcov.info'), 'SF:../a.js\nDA:2,5\nDA:3,2\nBRDA:2,0,0,2\nBRDA:2,0,1,3\nend_of_record\n');
+  const result = report(path.join(dir, 'a.js'), { coverage: path.join(dir, 'coverage', 'lcov.info') });
+  assert.ok(result.findings.length >= 2);
+  assert.equal(result.summary.score, 100, JSON.stringify(result.findings.map((f) => [f.category, f.covered])));
+});
+
+test('istanbul entries with null end columns still match branches', () => {
+  const finding = { file: 'a.js', line: 2, column: 7, endLine: 2, endColumn: 12, branch: true };
+  const coverage = parseIstanbul(JSON.stringify({
+    [path.resolve('a.js')]: {
+      statementMap: {},
+      s: {},
+      branchMap: { 0: { type: 'if', loc: { start: { line: 2, column: 2 }, end: { line: 4, column: null } } } },
+      b: { 0: [1, 1] },
+    },
+  }));
+  assert.equal(attachCoverage([finding], coverage)[0].covered, true);
 });
