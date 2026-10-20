@@ -5,8 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { verifyGenerated } from '../src/index.js';
-import { detectRunner } from '../src/runner.js';
+import { generate, report, verifyGenerated } from '../src/index.js';
+import { detectRunner, packageRunner } from '../src/runner.js';
 
 // Runner selection and the runner's working directory for `quell verify`, under the real Jest, Mocha and Vitest.
 // Projects live in os.tmpdir() and link the repository's node_modules (as verify itself does for its copy).
@@ -177,4 +177,135 @@ test('the library detects the runner too, and an explicit runner is reported as 
   const missing = verifyGenerated(null, { sourceFile, testPath: path.join(path.dirname(testFile), 'missing.test.js'), runner: 'mocha' });
   assert.equal(missing.verified, false);
   assert.match(missing.reason, /test file not found/);
+});
+
+// --- how package.json names a runner -------------------------------------------------------------------------------------
+
+function manifestDir(manifest) {
+  const dir = scratch();
+  write(path.join(dir, 'package.json'), typeof manifest === 'string' ? manifest : JSON.stringify(manifest));
+  return dir;
+}
+
+const SCRIPT_ONLY = [
+  ['jest --ci', 'jest'], ['jest', 'jest'], ['react-scripts test --watchAll=false', 'jest'], ['cross-env NODE_ENV=test jest --coverage', 'jest'], ['./node_modules/.bin/jest', 'jest'],
+  ['vitest', 'vitest'], ['vitest run', 'vitest'], ['npx vitest run --coverage', 'vitest'],
+  ['mocha', 'mocha'], ['c8 mocha "test/**/*.js"', 'mocha'], ['cross-env X=1 mocha --exit', 'mocha'],
+  ['node --test', 'node'], ['node --import tsx --test test/', 'node'],
+];
+
+test('a runner named only in scripts.test is detected (no dependencies)', () => {
+  for (const [script, expected] of SCRIPT_ONLY) {
+    const dir = manifestDir({ scripts: { test: script } });
+    assert.equal(packageRunner(dir), expected, script);
+    assert.equal(detectRunner(dir), expected, script);
+  }
+});
+
+test('names that only contain a runner name do not select it', () => {
+  const quiet = [
+    { devDependencies: { 'vitest-foo': '1' } }, { devDependencies: { '@vitest/ui': '1' } }, { devDependencies: { 'ts-jest': '1', 'jest-circus': '1', 'mocha-junit-reporter': '1' } },
+    { scripts: { test: 'jest-circus-runner' } }, { scripts: { test: 'ts-jest-helper' } }, { scripts: { test: 'echo mocha-free' } }, { scripts: { test: 'echo @vitest/ui' } },
+    { scripts: { test: 'node script.js' } }, { scripts: { test: 'node --test-reporter spec script.js' } },
+  ];
+  for (const manifest of quiet) {
+    const dir = manifestDir(manifest);
+    assert.equal(packageRunner(dir), null, JSON.stringify(manifest));
+    assert.equal(detectRunner(dir), 'node', JSON.stringify(manifest));
+  }
+});
+
+for (const [script, runner] of [['jest --ci', 'jest'], ['mocha', 'mocha'], ['vitest run', 'vitest']]) {
+  test(`verify detects ${runner} when only scripts.test names it ("${script}")`, { timeout: 240_000 }, () => {
+    const { dir, sourceFile, testFile } = project(runner, { manifest: { scripts: { test: script } } });
+    const run = quell(dir, 'verify', path.relative(dir, testFile), '--source', path.relative(dir, sourceFile));
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    assert.match(run.stdout, new RegExp(`^runner: ${runner} \\(detected from package\\.json\\)$`, 'm'));
+  });
+}
+
+test('a package.json that names no runner defers to the one above it, up to the project root and no further', { timeout: 240_000 }, () => {
+  // tests/package.json is only a module-type marker; jest is named by the project's package.json.
+  const marked = project('jest');
+  write(path.join(marked.dir, 'tests', 'package.json'), '{"type":"commonjs"}');
+  const run = verifyCli(marked.dir, marked.testFile, marked.sourceFile);
+  const result = JSON.parse(run.stdout || '{}');
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.deepEqual([result.runner, result.runnerSource], ['jest', 'detected']);
+  // The same walk serves generate's detectRunner and a workspace package that names no tooling of its own.
+  assert.equal(detectRunner(path.join(marked.dir, 'tests')), 'jest');
+  const workspace = scratch();
+  write(path.join(workspace, 'package.json'), JSON.stringify({ private: true, devDependencies: { vitest: '*' } }));
+  write(path.join(workspace, 'packages', 'a', 'package.json'), '{"name":"a"}');
+  assert.equal(detectRunner(path.join(workspace, 'packages', 'a')), 'vitest');
+  // A runner in a package.json above the project root is not used: the project is the package holding the source and the test.
+  const outer = scratch();
+  write(path.join(outer, 'package.json'), JSON.stringify({ devDependencies: { jest: '*' } }));
+  const inner = path.join(outer, 'app');
+  write(path.join(inner, 'package.json'), '{"name":"app","type":"module"}');
+  write(path.join(inner, 'src', 'add.js'), SOURCE.esm);
+  write(path.join(inner, 'tests', 'add.test.js'), TESTS.node('../src/add.js'));
+  const bounded = verifyCli(inner, path.join(inner, 'tests', 'add.test.js'), path.join(inner, 'src', 'add.js'));
+  const boundedResult = JSON.parse(bounded.stdout || '{}');
+  assert.equal(bounded.status, 0, bounded.stdout + bounded.stderr);
+  assert.deepEqual([boundedResult.runner, boundedResult.runnerSource], ['node', 'default']);
+});
+
+test('a package.json with a BOM is read; an unreadable one is reported as such, not as "no runner found"', { timeout: 120_000 }, () => {
+  const bom = project('mocha', { manifest: {} });
+  fs.writeFileSync(path.join(bom.dir, 'package.json'), `\uFEFF${JSON.stringify({ devDependencies: { mocha: '*' } })}`);
+  assert.equal(packageRunner(bom.dir), 'mocha');
+  // Mocha itself cannot parse a BOM package.json, so the run may fail; the point is which runner was chosen.
+  const detected = verifyCli(bom.dir, bom.testFile, bom.sourceFile);
+  assert.deepEqual([JSON.parse(detected.stdout).runner, JSON.parse(detected.stdout).runnerSource], ['mocha', 'detected']);
+
+  const nodeProject = (packageJson) => {
+    const dir = scratch();
+    if (packageJson === 'directory') fs.mkdirSync(path.join(dir, 'package.json'));
+    else write(path.join(dir, 'package.json'), packageJson);
+    write(path.join(dir, 'src', 'add.mjs'), SOURCE.esm);
+    write(path.join(dir, 'tests', 'add.test.mjs'), TESTS.node('../src/add.mjs'));
+    return quell(dir, 'verify', path.join('tests', 'add.test.mjs'), '--source', path.join('src', 'add.mjs'));
+  };
+  const invalid = nodeProject('{ "devDependencies": ');
+  assert.equal(invalid.status, 0, invalid.stdout + invalid.stderr);
+  assert.match(invalid.stdout, /^runner: node \(default: could not read package\.json \(.+\)\)$/m);
+  assert.doesNotMatch(invalid.stdout, /no runner found/);
+  const directory = nodeProject('directory');
+  assert.match(directory.stdout, /^runner: node \(default: could not read package\.json \(.+\)\)$/m);
+  const quiet = nodeProject('{"name":"x"}');
+  assert.match(quiet.stdout, /^runner: node \(default: no runner found in package\.json\)$/m);
+});
+
+test('a source and test path that differ in drive-letter case still run inside the copy (Windows)', { skip: process.platform !== 'win32' && 'drive letters exist only on Windows', timeout: 120_000 }, () => {
+  const dir = scratch();
+  write(path.join(dir, 'package.json'), '{"type":"module"}');
+  write(path.join(dir, 'src', 'add.js'), SOURCE.esm);
+  // Passes only when it runs in the throwaway copy (quell-verify-*), not in the real project.
+  write(path.join(dir, 'tests', 'add.test.js'), `${TESTS.node('../src/add.js')}test('cwd', () => {\n  assert.match(process.cwd(), /quell-verify-/);\n});\n`);
+  const lower = (file) => file.replace(/^[A-Z]:/, (drive) => drive.toLowerCase());
+  const upper = (file) => file.replace(/^[a-z]:/, (drive) => drive.toUpperCase());
+  const result = verifyGenerated(null, { sourceFile: upper(path.join(dir, 'src', 'add.js')), testPath: lower(path.join(dir, 'tests', 'add.test.js')) });
+  assert.equal(result.verified, true, JSON.stringify(result));
+  assert.equal(result.isolation, 'copy');
+  assert.equal(fs.readFileSync(path.join(dir, 'src', 'add.js'), 'utf8'), SOURCE.esm);
+});
+
+test('generate --verify says whether it detected the runner or was told', { timeout: 240_000 }, () => {
+  const repo = process.cwd();
+  for (const [options, expected] of [[{}, 'detected'], [{ runner: 'vitest' }, 'flag']]) {
+    const dir = scratch();
+    fs.cpSync(path.join(repo, 'eval', 'matrix', 'esm'), dir, { recursive: true });
+    write(path.join(dir, 'package.json'), JSON.stringify({ type: 'module', devDependencies: { vitest: '*' } }));
+    link(dir);
+    try {
+      process.chdir(dir);
+      const results = generate(report('src', { coverage: false }), { ...options, destination: path.join(dir, 'tests', 'quelltest'), verify: true });
+      const verified = results.filter((item) => item.status === 'VERIFIED');
+      assert.ok(verified.length >= 1, JSON.stringify(results.map((r) => [r.status, r.reason])));
+      assert.deepEqual([verified[0].verification.runner, verified[0].verification.runnerSource], ['vitest', expected]);
+    } finally {
+      process.chdir(repo);
+    }
+  }
 });

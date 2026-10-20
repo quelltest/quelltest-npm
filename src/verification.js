@@ -6,7 +6,7 @@ import { childNodes, parseSource } from './ast.js';
 import { BACKUP_SUFFIX, restoreIfInterrupted } from './backup.js';
 import { applyMutant, mutantsWithStats } from './mutate.js';
 import { mockBoundaryOf, mockedBindings } from './mocks.js';
-import { packageRunner } from './runner.js';
+import { findRunner } from './runner.js';
 
 const RUNNER_PACKAGES = {
   jest: { name: 'jest', args: (file) => ['--runTestsByPath', file] },
@@ -102,6 +102,10 @@ export function hasMeaningfulAssertion(testSource) {
 
 // --- isolation: verify in a throwaway copy so the real source is never modified --------------------------------
 
+// Windows paths compare without regard to case (and `c:\x` is `C:\x`); normalise the drive letter and compare through path.relative.
+const normalizeDrive = (file) => (process.platform === 'win32' ? file.replace(/^[a-z]:/, (drive) => drive.toUpperCase()) : file);
+const same = (a, b) => path.relative(a, b) === '';
+
 const isInside = (parent, child) => {
   const relative = path.relative(parent, child);
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
@@ -118,7 +122,8 @@ function commonAncestor(a, b) {
   const left = a.split(path.sep);
   const right = b.split(path.sep);
   const shared = [];
-  for (let i = 0; i < Math.min(left.length, right.length) && left[i] === right[i]; i += 1) shared.push(left[i]);
+  const fold = (part) => (process.platform === 'win32' ? part.toLowerCase() : part);
+  for (let i = 0; i < Math.min(left.length, right.length) && fold(left[i]) === fold(right[i]); i += 1) shared.push(left[i]);
   return shared.join(path.sep) || path.sep;
 }
 
@@ -130,16 +135,16 @@ const tooBroad = (dir) => dir === path.parse(dir).root || dir === os.homedir() |
  */
 function ownerRoot(testPath, root) {
   for (let dir = path.dirname(testPath); ; dir = path.dirname(dir)) {
-    if (dir !== root && tooBroad(dir)) return null;
+    if (!(root && same(dir, root)) && tooBroad(dir)) return null;
     if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
-    if (dir === root || path.dirname(dir) === dir) return null;
+    if ((root && same(dir, root)) || path.dirname(dir) === dir) return null;
   }
 }
 
 /** Directory to mirror: the package containing both files, else their common ancestor (never a filesystem root or home). */
 function mirrorRoot(sourceFile, testPath) {
   const pkg = packageRoot(path.dirname(sourceFile));
-  if (pkg && !tooBroad(pkg) && (testPath === pkg || isInside(pkg, testPath))) return pkg;
+  if (pkg && !tooBroad(pkg) && (same(pkg, testPath) || isInside(pkg, testPath))) return pkg;
   const common = commonAncestor(path.dirname(sourceFile), path.dirname(testPath));
   return tooBroad(common) ? null : common;
 }
@@ -238,18 +243,19 @@ export function verifyGenerated(testSource, options = {}) {
   let chosen = { runner: null, runnerSource: null };
   const unverified = (reason, extra = {}) => ({ verified: false, reason, correctCode: { passed: false }, injectedBug: { passed: false }, mutants: [], killed: 0, total: 0, ignored: 0, mutationScore: null, ...chosen, ...extra });
   if (!options.sourceFile || !fs.existsSync(options.sourceFile)) return unverified('no source file to mutate: pass options.sourceFile');
-  const sourceFile = path.resolve(options.sourceFile);
+  const sourceFile = normalizeDrive(path.resolve(options.sourceFile));
   restoreIfInterrupted(sourceFile);
   const ext = path.extname(sourceFile);
   // The runner: --runner, else the nearest package.json at or above the test (within the project), else node:test. A custom
   // command involves no runner. Without a test path the test will sit next to the source, so detect from there.
-  const probePath = options.testPath ? path.resolve(options.testPath) : path.join(path.dirname(sourceFile), 'quelltest-verify.test');
+  const probePath = options.testPath ? normalizeDrive(path.resolve(options.testPath)) : path.join(path.dirname(sourceFile), 'quelltest-verify.test');
   const projectRoot = mirrorRoot(sourceFile, probePath);
   const owner = ownerRoot(probePath, projectRoot);
-  if (options.runner && !command) chosen = { runner: options.runner, runnerSource: 'flag' };
+  // The first package.json from the test upwards that names a runner (within the project) also gives the runner's cwd.
+  const found = command ? null : findRunner(path.dirname(probePath), { stopAt: projectRoot ?? undefined });
+  if (options.runner && !command) chosen = { runner: options.runner, runnerSource: ['detected', 'default'].includes(options.runnerSource) ? options.runnerSource : 'flag' };
   else if (!command) {
-    const detected = owner ? packageRunner(owner) : null;
-    chosen = detected ? { runner: detected, runnerSource: 'detected' } : { runner: 'node', runnerSource: 'default' };
+    chosen = found.runner ? { runner: found.runner, runnerSource: 'detected' } : { runner: 'node', runnerSource: 'default', runnerNote: found.error ?? 'no runner found in package.json' };
   }
   const { runner } = chosen;
   const testPath = options.testPath ? probePath : path.resolve(path.join(path.dirname(sourceFile), `${path.basename(sourceFile, ext)}.quelltest-verify.test${runner === 'node' ? '.mjs' : ext}`));
@@ -273,12 +279,12 @@ export function verifyGenerated(testSource, options = {}) {
     }
   }
   const isolation = mirror ? 'copy' : 'in-place';
-  const map = (file) => (mirror && (file === root || isInside(root, file)) ? path.join(mirror.dir, path.relative(root, file)) : file);
+  const map = (file) => (mirror && (same(root, file) || isInside(root, file)) ? path.join(mirror.dir, path.relative(root, file)) : file);
   const runSource = map(sourceFile);
   const runTestPath = map(testPath);
   // A runner runs in the root of the package that owns the test (Vitest takes its root, and Jest and Mocha their config, from
   // the working directory). A custom command keeps the source file's folder, as documented.
-  const cwd = path.resolve(options.cwd ?? (command ? path.dirname(sourceFile) : (owner ?? projectRoot ?? path.dirname(sourceFile))));
+  const cwd = path.resolve(options.cwd ?? (command ? path.dirname(sourceFile) : (found?.dir ?? owner ?? projectRoot ?? path.dirname(sourceFile))));
   const runOptions = { runner, cwd: map(cwd), timeoutMs, command, infraExitCodes };
 
   // In place, writing `testSource` to an existing file would destroy it (the finally block deletes it afterwards).

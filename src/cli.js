@@ -51,7 +51,7 @@ Options:
   --in-place             verify: mutate the source file itself instead of a temporary copy
   --examples FILE        mocks: HAR file, JSON examples file or OpenAPI JSON with recorded responses
   --strict               gate: also fail on 'expected value changed' review items
-  --runner NAME          generate/verify: node, jest, vitest or mocha (default: detected from the nearest package.json, else node:test;
+  --runner NAME          generate/verify: node, jest, vitest or mocha (default: detected from the nearest package.json that names a runner, else node:test;
                          verify looks from the test file up to the project root and runs the runner in that package's root)
   -h, --help | -v, --version`;
 
@@ -73,7 +73,7 @@ function printScore(result) {
   else console.log(`Score: ${summary.score}/100 ${summary.tier} | ${summary.covered}/${summary.total} candidates executed by tests | coverage evidence: ${summary.coverageEvidence}`);
 }
 
-const RUNNER_SOURCE = { flag: '--runner', detected: 'detected from package.json', default: 'default: no runner found in package.json' };
+const RUNNER_SOURCE = { flag: '--runner', detected: 'detected from package.json' };
 
 function runVerify(testFile, options) {
   if (!options.source) throw new UsageError('verify requires --source FILE');
@@ -88,7 +88,7 @@ function runVerify(testFile, options) {
   else {
     const suffix = `${result.isolation ? ` [${result.isolation}]` : ''}${result.ignored ? `, ${result.ignored} ignored` : ''}${result.inconclusive ? `, ${result.inconclusive} inconclusive` : ''}`;
     console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)${suffix}` : `Not verified: ${result.reason}${suffix}`);
-    if (result.runner) console.log(`runner: ${result.runner} (${RUNNER_SOURCE[result.runnerSource]})`);
+    if (result.runner) console.log(`runner: ${result.runner} (${RUNNER_SOURCE[result.runnerSource] ?? `default: ${result.runnerNote ?? 'no runner found in package.json'}`})`);
     for (const mutant of result.mutants.filter((item) => item.outcome === 'survived')) console.log(`  survived: ${mutant.description}`);
     if (options.handoff) console.log(`Handoff written to ${options.handoff}`);
   }

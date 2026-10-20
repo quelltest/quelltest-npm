@@ -1,31 +1,66 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export const RUNNERS = ['node', 'jest', 'vitest', 'mocha'];
 
+// A package search never climbs into a filesystem root or the home directory (a stray package.json there is not the project's).
+const isBroad = (dir) => dir === path.parse(dir).root || dir === os.homedir();
+
+// A word in a script: not part of a longer name (jest-circus, mocha-free, ts-jest, @jest/globals) but fine after a path (.bin/jest).
+const word = (names) => new RegExp(String.raw`(?<![\w@-])(?:${names})(?![\w-])`);
+const SCRIPT = { vitest: word('vitest'), jest: word('jest|react-scripts'), mocha: word('mocha'), node: new RegExp(String.raw`(?<![\w@-])node\s.*--test(?![\w-])`) };
+
 /**
- * The runner a package.json names: vitest, then jest/react-scripts, then mocha (dependencies, devDependencies, the `jest` key
- * or the `test` script), or `node` for a `node --test` script. `null` when it names none (or cannot be read).
+ * Read the runner one package.json names: vitest, then jest/react-scripts, then mocha (dependencies, devDependencies, the `jest`
+ * key or the `test` script), or `node` for a `node --test` script. `{ runner, error }`: `runner` is null when it names none,
+ * `error` says why the file could not be read (a missing file is not an error).
  */
-export function packageRunner(dir) {
+function inspectPackage(dir) {
+  const file = path.join(dir, 'package.json');
+  if (!fs.existsSync(file)) return { runner: null, error: null };
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    const pkg = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
     const deps = { ...pkg.dependencies, ...pkg.devDependencies };
     const script = String(pkg.scripts?.test ?? '');
-    if (deps.vitest || /vitest/.test(script)) return 'vitest';
-    if (deps.jest || deps['react-scripts'] || pkg.jest || /(?:jest|react-scripts)/.test(script)) return 'jest';
-    if (deps.mocha || /mocha/.test(script)) return 'mocha';
-    if (/node.*--test/.test(script)) return 'node';
-  } catch { /* unreadable package.json: no signal */ }
-  return null;
+    if (deps.vitest || SCRIPT.vitest.test(script)) return { runner: 'vitest', error: null };
+    if (deps.jest || deps['react-scripts'] || pkg.jest || SCRIPT.jest.test(script)) return { runner: 'jest', error: null };
+    if (deps.mocha || SCRIPT.mocha.test(script)) return { runner: 'mocha', error: null };
+    if (SCRIPT.node.test(script)) return { runner: 'node', error: null };
+    return { runner: null, error: null };
+  } catch (error) {
+    return { runner: null, error: `could not read package.json (${String(error.message).split(/\r?\n/)[0]})` };
+  }
 }
 
-/** Pick the test runner from the nearest package.json (see packageRunner), else node:test. */
-export function detectRunner(cwd = process.cwd()) {
-  for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, 'package.json'))) return packageRunner(dir) ?? 'node';
-    if (path.dirname(dir) === dir) return 'node';
+/** The runner one package.json names (see inspectPackage), or null. */
+export function packageRunner(dir) {
+  return inspectPackage(dir).runner;
+}
+
+/**
+ * Find the runner for code under `startDir`: the nearest package.json that names a runner wins, so a marker package.json
+ * (`{"type":"commonjs"}`) or a workspace package without test tooling defers to the package above it. The walk never goes
+ * above `stopAt` (inclusive), nor into a filesystem root or home directory. Result: `{ runner, dir, error }`; `runner` is null
+ * when none names one, `error` is the first package.json that could not be read (set even when a runner is found above it).
+ */
+export function findRunner(startDir, { stopAt } = {}) {
+  let error = null;
+  const start = path.resolve(startDir);
+  const atStop = (dir) => stopAt !== undefined && path.relative(path.resolve(stopAt), dir) === '';
+  for (let dir = start; ; dir = path.dirname(dir)) {
+    if (dir !== start && !atStop(dir) && isBroad(dir)) break;
+    const found = inspectPackage(dir);
+    error ??= found.error;
+    if (found.runner) return { runner: found.runner, dir, error };
+    if (atStop(dir) || path.dirname(dir) === dir) break;
   }
+  return { runner: null, dir: null, error };
+}
+
+/** Pick the test runner like findRunner does (see there), else node:test. */
+export function detectRunner(cwd = process.cwd()) {
+  return findRunner(cwd).runner ?? 'node';
 }
 
 const quote = (text) => JSON.stringify(text);
