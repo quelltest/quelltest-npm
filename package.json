@@ -50,7 +50,7 @@
   ],
   "license": "Apache-2.0",
   "dependencies": {
-    "@babel/parser": "^7.26.2"
+    "@babel/parser": "^8.0.7"
   },
   "devDependencies": {
     "jest": "^30.5.2",
