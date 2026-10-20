@@ -3,13 +3,41 @@
   "version": "0.1.0",
   "description": "Offline-first edge-case discovery and production-readiness scoring for JavaScript and TypeScript projects.",
   "type": "module",
-  "bin": { "quell": "./src/cli.js" },
-  "exports": {
-    ".": { "import": "./src/index.js", "require": "./src/index.cjs", "types": "./src/index.d.ts" }
+  "bin": {
+    "quell": "./src/cli.js"
   },
-  "files": ["src", "README.md", "LICENSE"],
-  "scripts": { "test": "node --test", "test:verify": "node scripts/verification-smoke.mjs", "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check scripts/verification-smoke.mjs", "pack:check": "npm pack --dry-run", "test:ci": "npm test && npm run test:verify && npm run check && npm run pack:check" },
-  "engines": { "node": ">=20" },
-  "keywords": ["testing", "test-generation", "edge-cases", "mutation-testing", "typescript", "production-readiness"],
-  "license": "MIT"
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "require": "./src/index.cjs",
+      "types": "./src/index.d.ts"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "test:verify": "node scripts/verification-smoke.mjs",
+    "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check src/scan.js && node --check src/files.js && node --check scripts/verification-smoke.mjs",
+    "pack:check": "npm pack --dry-run",
+    "test:ci": "npm test && npm run test:verify && npm run check && npm run pack:check"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "testing",
+    "test-generation",
+    "edge-cases",
+    "mutation-testing",
+    "typescript",
+    "production-readiness"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@babel/parser": "^7.26.2"
+  }
 }
