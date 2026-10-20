@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { childNodes, parseSource } from './ast.js';
 import { BACKUP_SUFFIX, restoreIfInterrupted } from './backup.js';
 import { applyMutant, mutantsWithStats } from './mutate.js';
+import { mockBoundaryOf, mockedBindings } from './mocks.js';
 
 const RUNNER_PACKAGES = {
   jest: { name: 'jest', args: (file) => ['--runTestsByPath', file] },
@@ -255,6 +256,7 @@ export function verifyGenerated(testSource, options = {}) {
     const { list: candidates, ignored } = mutantsWithStats(original, sourceFile, { functions, lines, max: maxMutants, maxPerKind });
     if (!candidates.length) return unverified('no applicable mutation in the code under test', { correctCode, isolation, ignored });
     const results = [];
+    const mocked = mockedBindings({ testText: source, testFile: testPath, sourceText: original, sourceFile });
     if (!mirror) fs.writeFileSync(sourceFile + BACKUP_SUFFIX, original, 'utf8');
     try {
       if (mirror) breakLink(runSource);
@@ -267,6 +269,7 @@ export function verifyGenerated(testSource, options = {}) {
         results.push({
           description: mutant.description, kind: mutant.kind, line: mutant.line, function: mutant.function, outcome, killed: outcome === 'killed',
           before: lineAt(original, mutant.start), after: lineAt(mutated, mutant.start),
+          mockBoundary: outcome === 'survived' ? mockBoundaryOf(lineAt(original, mutant.start), mocked) : null,
         });
       }
     } finally {
@@ -289,7 +292,8 @@ export function verifyGenerated(testSource, options = {}) {
     return {
       verified: reason === null, reason,
       correctCode, injectedBug: { passed: killed > 0 }, mutants: results, killed, total: results.length, inconclusive, ignored, mutationScore,
-      isolation, sourceFile, testPath, warnings,
+      isolation, sourceFile, testPath, warnings, mocked: [...mocked],
+      survivorsOnMockedCode: results.filter((item) => item.outcome === 'survived' && item.mockBoundary).length,
       byKind: Object.fromEntries([...new Set(results.map((item) => item.kind))].map((kind) => [kind, { total: results.filter((item) => item.kind === kind).length, killed: results.filter((item) => item.kind === kind && item.killed).length }])),
     };
   } finally {
