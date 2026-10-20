@@ -1,0 +1,70 @@
+name: "Agent: release"
+
+# Push a tag like v0.3.1 and this checks, publishes and writes the GitHub release:
+#   git tag v0.3.1 && git push upstream v0.3.1
+# It refuses a tag that does not match package.json, runs the full CI script first, publishes to npm when the secret
+# NPM_TOKEN exists (a granular token with publish rights; with provenance when the repository is public), and creates the
+# GitHub release from the matching CHANGELOG section. Without NPM_TOKEN it stops after the release notes.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Tag matches package.json and the changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error title=Tag mismatch::tag $TAG does not match package.json version $version"
+            exit 1
+          fi
+          awk -v v="$version" '$0 == "## " v {found=1; next} /^## / {found=0} found' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error title=No changelog::CHANGELOG.md has no '## $version' section"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - run: npm run test:ci
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PUBLIC: ${{ github.event.repository.private == false }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice title=npm publish skipped::NPM_TOKEN is not set; publish manually with npm publish --access public"
+            exit 0
+          fi
+          if npm view "quelltest@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice title=Already published::quelltest@$VERSION is already on npm"
+            exit 0
+          fi
+          if [ "$PUBLIC" = "true" ]; then npm publish --access public --provenance; else npm publish --access public; fi
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file release-notes.md
+          else
+            gh release create "$TAG" --title "quelltest $TAG" --notes-file release-notes.md
+          fi

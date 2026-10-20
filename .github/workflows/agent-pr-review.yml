@@ -1,0 +1,55 @@
+name: "Agent: PR review"
+
+# An automatic reviewer for every pull request from this repository (not forks: forks cannot read secrets, and this
+# workflow never checks out untrusted fork code with a privileged token). Disabled until CLAUDE_AGENTS_ENABLED=true and
+# ANTHROPIC_API_KEY are set. It complements the deterministic quelltest gate in the PR report workflow.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: agent-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      vars.CLAUDE_AGENTS_ENABLED == 'true' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            BASE: ${{ github.event.pull_request.base.ref }}
+
+            Review this pull request. Be specific and brief; post one summary comment and inline comments only for real problems.
+
+            Check, in this order:
+            1. Correctness bugs and unsafe behaviour (data loss, command or path injection, prototype pollution, shell quoting).
+            2. Tests that pass vacuously, missing tests for new behaviour, and weakened assertions (run `node src/cli.js gate --diff origin/${{ github.event.pull_request.base.ref }}`).
+            3. Scanner and generator precision: new rules or synthesis that would produce false positives on ordinary Express/React code.
+            4. Repo rules: Apache-2.0 only, no AI attribution lines in commits or PR text, CHANGELOG updated for user-visible changes, docs match behaviour.
+            Do not restate the diff. Do not approve or request changes; leave that to a human.
+          claude_args: |
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(node src/cli.js:*),Bash(npm test:*)"

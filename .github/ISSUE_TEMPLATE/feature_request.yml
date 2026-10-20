@@ -1,0 +1,28 @@
+name: Feature request
+description: A new rule, check, command or integration
+title: "feat(scope): "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What goes wrong today, with a concrete example from real code if you have one.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: How we would know it works
+      description: A flagged example and a safe twin that must stay quiet, or a before/after number.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Links to papers, issues, reports or user feedback. Mark vendor claims as claims.

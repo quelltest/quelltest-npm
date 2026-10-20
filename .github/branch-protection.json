@@ -1,0 +1,24 @@
+{
+  "required_status_checks": {
+    "strict": false,
+    "contexts": [
+      "test (node 20, ubuntu-latest)",
+      "test (node 22, ubuntu-latest)",
+      "test (node 24, ubuntu-latest)",
+      "test (node 22, windows-latest)",
+      "python-quality"
+    ]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 0,
+    "dismiss_stale_reviews": false,
+    "require_code_owner_reviews": false
+  },
+  "restrictions": null,
+  "required_linear_history": false,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_conversation_resolution": false,
+  "block_creations": false
+}
