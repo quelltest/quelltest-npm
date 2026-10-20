@@ -1,32 +1,73 @@
 #!/usr/bin/env node
-import { report, generate } from './index.js';
+import fs from 'node:fs';
+import { report, generate, toSarif } from './index.js';
+import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
-const args = process.argv.slice(2);
-const command = args.find((arg) => !arg.startsWith('-')) || 'find';
-const root = args.find((arg) => !arg.startsWith('-') && arg !== command) || '.';
-const json = args.includes('--json');
-const thresholdIndex = args.indexOf('--threshold');
-const threshold = thresholdIndex >= 0 ? Number(args[thresholdIndex + 1]) : null;
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-if (args.includes('--help')) {
-  console.log('Usage: quell <find|score|generate> [PATH] [--json] [--write] [--threshold N]');
-  process.exit(0);
-}
-if (args.includes('--version')) {
-  console.log('0.1.0');
-  process.exit(0);
+// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from
+const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3 };
+
+const HELP = `Usage: quell <${COMMANDS.join('|')}> [PATH] [options]
+
+PATH may be a directory or a single file (default: .).
+
+Options:
+  --json                 print the full report as JSON
+  --sarif                print SARIF 2.1.0 (for GitHub code scanning)
+  --coverage FILE        coverage-final.json or lcov.info (default: ./coverage/*)
+  --diff REF             only candidates on lines changed since the merge-base with REF
+  --all                  show covered candidates and do not truncate the list
+  --top N                number of candidates to print (default: 10)
+  --threshold N          exit ${EXIT.belowThreshold} when the score is below N (${EXIT.notScored} when it cannot be scored)
+  --include GLOB         only scan matching files (repeatable)
+  --exclude GLOB         skip matching files (repeatable; alias --ignore; also .quellignore)
+  --include-tests        scan test files too
+  --write                generate: write scaffolds to disk
+  -h, --help | -v, --version`;
+
+function printFind(result, options) {
+  const evidence = result.summary.coverageEvidence !== 'none';
+  const pending = evidence && !options.all ? result.findings.filter((item) => !item.covered) : result.findings;
+  const limit = options.all ? pending.length : (options.top ?? 10);
+  const shown = pending.slice(0, limit);
+  const covered = result.findings.length - pending.length;
+  console.log(`Quell scan — ${pending.length} edge-case candidates${evidence ? ` not executed by tests (${covered} already covered)` : ''}, showing ${shown.length}`);
+  for (const item of shown) console.log(`• ${item.file}:${item.line} [${item.rule ?? item.category}] ${item.function} — ${item.suggestion}`);
+  if (pending.length > shown.length) console.log(`… ${pending.length - shown.length} more (use --all or --top N)`);
+  if (!evidence) console.log('Coverage evidence: none (pass --coverage FILE to hide candidates your tests already run)');
 }
 
-const result = report(root);
-if (command === 'generate') {
-  const generated = { ...result, findings: generate(result, { write: args.includes('--write') }) };
-  if (json) console.log(JSON.stringify(generated, null, 2));
-  else console.log(`${args.includes('--write') ? 'Generated' : 'Planned'} ${generated.findings.length} safe test scaffolds`);
+function printScore(result) {
+  const { summary } = result;
+  if (summary.score === null) console.log(`Score: not scored (${summary.tier === 'no-findings' ? 'no edge-case candidates found' : 'no coverage evidence'}) | ${summary.total} candidates`);
+  else console.log(`Score: ${summary.score}/100 ${summary.tier} | ${summary.covered}/${summary.total} candidates executed by tests | coverage evidence: ${summary.coverageEvidence}`);
 }
-else if (json) console.log(JSON.stringify(result, null, 2));
-else if (command === 'score') console.log(`PRS ${result.summary.score}/100  ${result.summary.tier}  |  ${result.findings.length} edge-case candidates`);
-else {
-  console.log(`Quell scan — ${result.findings.length} edge-case candidates found`);
-  for (const item of result.findings) console.log(`• ${item.file}:${item.line} [${item.category}] ${item.suggestion}`);
+
+function run(argv) {
+  const { command, root, options } = parseArgs(argv);
+  if (options.help) { console.log(HELP); return EXIT.ok; }
+  if (options.version) { console.log(VERSION); return EXIT.ok; }
+  const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff };
+  const result = report(root, scanOptions);
+  if (command === 'generate') {
+    const generated = { ...result, findings: generate(result, { write: options.write }) };
+    if (options.json) console.log(JSON.stringify(generated, null, 2));
+    else console.log(`${options.write ? 'Generated' : 'Planned'} ${generated.findings.length} scaffolds`);
+  } else if (options.sarif) console.log(JSON.stringify(toSarif(result, VERSION), null, 2));
+  else if (options.json) console.log(JSON.stringify(result, null, 2));
+  else if (command === 'score') printScore(result);
+  else printFind(result, options);
+  if (result.skipped.length) console.error(`quell: skipped ${result.skipped.length} unparsable file(s): ${result.skipped.slice(0, 3).join(', ')}${result.skipped.length > 3 ? ', …' : ''}`);
+  if (options.threshold === undefined) return EXIT.ok;
+  if (result.summary.score === null) return result.summary.tier === 'no-findings' ? EXIT.ok : EXIT.notScored;
+  return result.summary.score < options.threshold ? EXIT.belowThreshold : EXIT.ok;
 }
-if (threshold !== null && result.summary.score < threshold) process.exitCode = 1;
+
+try {
+  process.exitCode = run(process.argv.slice(2));
+} catch (error) {
+  const hint = error instanceof UsageError ? '\nRun `quell --help` for usage.' : '';
+  console.error(`quell: ${error.code === 'ENOENT' ? `no such file or directory: ${error.path}` : error.message}${hint}`);
+  process.exitCode = EXIT.error;
+}
