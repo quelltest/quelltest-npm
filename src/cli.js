@@ -52,7 +52,8 @@ Options:
   --examples FILE        mocks: HAR file, JSON examples file or OpenAPI JSON with recorded responses
   --strict               gate: also fail on 'expected value changed' review items
   --runner NAME          generate/verify: node, jest, vitest or mocha (default: detected from the nearest package.json that names a runner, else node:test;
-                         verify looks from the test file up to the project root and runs the runner in that package's root)
+                         verify looks from the test file up to the project root, never above it, and runs the runner in the folder of the
+                         package.json that names it, else of the nearest package.json)
   -h, --help | -v, --version`;
 
 function printFind(result, options) {

@@ -5,7 +5,8 @@ import path from 'node:path';
 export const RUNNERS = ['node', 'jest', 'vitest', 'mocha'];
 
 // A package search never climbs into a filesystem root or the home directory (a stray package.json there is not the project's).
-const isBroad = (dir) => dir === path.parse(dir).root || dir === os.homedir();
+// Compared with path.relative so that Windows case differences (c:\ and C:\) cannot defeat the bound.
+const isBroad = (dir) => [path.parse(dir).root, os.homedir()].some((broad) => broad && path.relative(broad, dir) === '');
 
 // A word in a script: not part of a longer name (jest-circus, mocha-free, ts-jest, @jest/globals) but fine after a path (.bin/jest).
 const word = (names) => new RegExp(String.raw`(?<![\w@-])(?:${names})(?![\w-])`);

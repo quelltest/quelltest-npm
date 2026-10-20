@@ -127,7 +127,7 @@ function commonAncestor(a, b) {
   return shared.join(path.sep) || path.sep;
 }
 
-const tooBroad = (dir) => dir === path.parse(dir).root || dir === os.homedir() || dir.split(path.sep).filter(Boolean).length < 2;
+const tooBroad = (dir) => [path.parse(dir).root, os.homedir()].some((broad) => broad && same(broad, dir)) || dir.split(path.sep).filter(Boolean).length < 2;
 
 /**
  * Root of the package that owns the test: the nearest directory with a package.json at or above it, never above `root` (the
@@ -255,7 +255,7 @@ export function verifyGenerated(testSource, options = {}) {
   const found = command ? null : findRunner(path.dirname(probePath), { stopAt: projectRoot ?? undefined });
   if (options.runner && !command) chosen = { runner: options.runner, runnerSource: ['detected', 'default'].includes(options.runnerSource) ? options.runnerSource : 'flag' };
   else if (!command) {
-    chosen = found.runner ? { runner: found.runner, runnerSource: 'detected' } : { runner: 'node', runnerSource: 'default', runnerNote: found.error ?? 'no runner found in package.json' };
+    chosen = found.runner ? { runner: found.runner, runnerSource: 'detected' } : { runner: 'node', runnerSource: 'default', runnerNote: found.error ?? 'no runner found in package.json at or below the project root (pass --runner to choose one)' };
   }
   const { runner } = chosen;
   const testPath = options.testPath ? probePath : path.resolve(path.join(path.dirname(sourceFile), `${path.basename(sourceFile, ext)}.quelltest-verify.test${runner === 'node' ? '.mjs' : ext}`));
@@ -282,8 +282,9 @@ export function verifyGenerated(testSource, options = {}) {
   const map = (file) => (mirror && (same(root, file) || isInside(root, file)) ? path.join(mirror.dir, path.relative(root, file)) : file);
   const runSource = map(sourceFile);
   const runTestPath = map(testPath);
-  // A runner runs in the root of the package that owns the test (Vitest takes its root, and Jest and Mocha their config, from
-  // the working directory). A custom command keeps the source file's folder, as documented.
+  // A runner runs in the folder of the package.json that names it (else the nearest package.json at or above the test, else the
+  // project root): Vitest takes its root, and Jest and Mocha their config, from the working directory. A custom command keeps
+  // the source file's folder, as documented.
   const cwd = path.resolve(options.cwd ?? (command ? path.dirname(sourceFile) : (found?.dir ?? owner ?? projectRoot ?? path.dirname(sourceFile))));
   const runOptions = { runner, cwd: map(cwd), timeoutMs, command, infraExitCodes };
 

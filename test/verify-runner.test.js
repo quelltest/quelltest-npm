@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { generate, report, verifyGenerated } from '../src/index.js';
-import { detectRunner, packageRunner } from '../src/runner.js';
+import { detectRunner, findRunner, packageRunner } from '../src/runner.js';
 
 // Runner selection and the runner's working directory for `quell verify`, under the real Jest, Mocha and Vitest.
 // Projects live in os.tmpdir() and link the repository's node_modules (as verify itself does for its copy).
@@ -134,7 +134,7 @@ test('nothing detectable falls back to node:test, and a package.json above the p
   const result = JSON.parse(run.stdout || '{}');
   assert.equal(run.status, 0, run.stdout + run.stderr);
   assert.deepEqual([result.runner, result.runnerSource], ['node', 'default']);
-  assert.match(quell(dir, 'verify', path.relative(dir, testFile), '--source', path.relative(dir, sourceFile)).stdout, /^runner: node \(default: no runner found in package\.json\)$/m);
+  assert.match(quell(dir, 'verify', path.relative(dir, testFile), '--source', path.relative(dir, sourceFile)).stdout, /^runner: node \(default: no runner found in package\.json at or below the project root \(pass --runner to choose one\)\)$/m);
 });
 
 test('the package.json nearest to the test decides in a monorepo (source and test in different packages)', { timeout: 240_000 }, () => {
@@ -274,7 +274,7 @@ test('a package.json with a BOM is read; an unreadable one is reported as such, 
   const directory = nodeProject('directory');
   assert.match(directory.stdout, /^runner: node \(default: could not read package\.json \(.+\)\)$/m);
   const quiet = nodeProject('{"name":"x"}');
-  assert.match(quiet.stdout, /^runner: node \(default: no runner found in package\.json\)$/m);
+  assert.match(quiet.stdout, /^runner: node \(default: no runner found in package\.json at or below the project root/m);
 });
 
 test('a source and test path that differ in drive-letter case still run inside the copy (Windows)', { skip: process.platform !== 'win32' && 'drive letters exist only on Windows', timeout: 120_000 }, () => {
@@ -308,4 +308,82 @@ test('generate --verify says whether it detected the runner or was told', { time
       process.chdir(repo);
     }
   }
+});
+
+test('a runner hoisted above the project root is not used by verify; --runner is the way', { timeout: 240_000 }, () => {
+  // The workspace root lists jest; packages/a (the project, since it holds the source and the test) names nothing.
+  const dir = scratch();
+  write(path.join(dir, 'package.json'), JSON.stringify({ private: true, devDependencies: { jest: '*' } }));
+  write(path.join(dir, 'packages', 'a', 'package.json'), '{"name":"a"}');
+  const sourceFile = path.join(dir, 'packages', 'a', 'src', 'add.js');
+  const testFile = path.join(dir, 'packages', 'a', 'tests', 'add.test.js');
+  write(sourceFile, SOURCE.cjs);
+  write(testFile, TESTS.jest('../src/add.js'));
+  link(dir);
+  const plain = quell(dir, 'verify', path.relative(dir, testFile), '--source', path.relative(dir, sourceFile));
+  assert.equal(plain.status, 4, plain.stdout + plain.stderr);
+  assert.match(plain.stdout, /^runner: node \(default: no runner found in package\.json at or below the project root \(pass --runner to choose one\)\)$/m);
+  const forced = verifyCli(dir, testFile, sourceFile, '--runner', 'jest');
+  const result = JSON.parse(forced.stdout || '{}');
+  assert.equal(forced.status, 0, forced.stdout + forced.stderr);
+  assert.deepEqual([result.runner, result.runnerSource], ['jest', 'flag']);
+  // generate's detection has no project root to stop at and does find the hoisted runner.
+  assert.equal(detectRunner(path.join(dir, 'packages', 'a')), 'jest');
+});
+
+// --- the home-directory bound -------------------------------------------------------------------------------------------
+
+/** Run `fn` with HOME and USERPROFILE (what os.homedir() reads) pointing at `home`. */
+function withHome(home, fn) {
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    return fn();
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+const driveCase = (file, change) => file.replace(/^[A-Za-z]:/, (drive) => change(drive));
+
+test('a package.json in the home directory is never used for a project below it', () => {
+  const home = scratch();
+  write(path.join(home, 'package.json'), JSON.stringify({ devDependencies: { jest: '*' } }));
+  const project = path.join(home, 'work', 'proj');
+  write(path.join(project, 'package.json'), '{"name":"proj"}');
+  fs.mkdirSync(path.join(project, 'sub'), { recursive: true });
+  withHome(home, () => {
+    assert.equal(findRunner(path.join(project, 'sub')).runner, null);
+    assert.equal(detectRunner(path.join(project, 'sub')), 'node');
+    // The bound is on the walk, not on the start: a project that is the home directory still reads its own package.json.
+    assert.equal(findRunner(home).runner, 'jest');
+  });
+  // Without the fake home the same decoy is an ordinary ancestor and is used, so the bound is what stops it.
+  assert.equal(findRunner(path.join(project, 'sub')).runner, 'jest');
+});
+
+test('the home-directory bound holds when the drive letter differs in case (Windows)', { skip: process.platform !== 'win32' && 'drive letters exist only on Windows' }, () => {
+  const home = scratch();
+  write(path.join(home, 'package.json'), JSON.stringify({ devDependencies: { jest: '*' } }));
+  const sub = path.join(home, 'work', 'proj', 'sub');
+  fs.mkdirSync(sub, { recursive: true });
+  withHome(driveCase(home, (drive) => drive.toLowerCase()), () => assert.equal(findRunner(driveCase(sub, (drive) => drive.toUpperCase())).runner, null));
+  withHome(driveCase(home, (drive) => drive.toUpperCase()), () => assert.equal(findRunner(driveCase(sub, (drive) => drive.toLowerCase())).runner, null));
+});
+
+test('verify never mirrors the home directory, even when its drive letter differs in case', { timeout: 120_000, skip: process.platform !== 'win32' && 'drive letters exist only on Windows' }, () => {
+  // Source in one package and test in another: their common ancestor is the home directory, which must not be mirrored.
+  const home = scratch();
+  write(path.join(home, 'a', 'package.json'), '{"name":"a","type":"module"}');
+  write(path.join(home, 'a', 'src', 'add.mjs'), SOURCE.esm);
+  write(path.join(home, 'b', 'tests', 'add.test.mjs'), TESTS.node('../../a/src/add.mjs'));
+  withHome(driveCase(home, (drive) => drive.toLowerCase()), () => {
+    const result = verifyGenerated(null, { sourceFile: driveCase(path.join(home, 'a', 'src', 'add.mjs'), (drive) => drive.toUpperCase()), testPath: path.join(home, 'b', 'tests', 'add.test.mjs') });
+    assert.equal(result.isolation, 'in-place', JSON.stringify(result));
+    assert.equal(fs.readFileSync(path.join(home, 'a', 'src', 'add.mjs'), 'utf8'), SOURCE.esm);
+  });
 });
