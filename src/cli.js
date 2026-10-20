@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import { report, generate, toSarif } from './index.js';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { report, generate, generateWithLlm, toSarif, verifyGenerated } from './index.js';
 import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from
-const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3 };
+// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from · 4 verify: test not verified
+const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3, notVerified: 4 };
 
 const HELP = `Usage: quell <${COMMANDS.join('|')}> [PATH] [options]
+       quell verify TEST_FILE --source FILE [--function NAME] [--runner NAME]
 
 PATH may be a directory or a single file (default: .).
 
@@ -23,7 +26,13 @@ Options:
   --include GLOB         only scan matching files (repeatable)
   --exclude GLOB         skip matching files (repeatable; alias --ignore; also .quellignore)
   --include-tests        scan test files too
-  --write                generate: write scaffolds to disk
+  --write                generate: write tests (and TODO notes) to disk
+  --destination DIR      generate: output directory (default: tests/quelltest)
+  --verify               generate: run each test and require it to fail on a source mutant
+  --llm MODULE           generate: ESM module whose default export writes tests for findings the rules cannot
+  --source FILE          verify: source file to mutate (required)
+  --function NAME        verify: only mutate this function (repeatable)
+  --runner NAME          generate/verify: node, jest, vitest or mocha (generate default: detected from package.json)
   -h, --help | -v, --version`;
 
 function printFind(result, options) {
@@ -44,20 +53,46 @@ function printScore(result) {
   else console.log(`Score: ${summary.score}/100 ${summary.tier} | ${summary.covered}/${summary.total} candidates executed by tests | coverage evidence: ${summary.coverageEvidence}`);
 }
 
-function run(argv) {
-  const { command, root, options } = parseArgs(argv);
+function runVerify(testFile, options) {
+  if (!options.source) throw new UsageError('verify requires --source FILE');
+  const result = verifyGenerated(null, { sourceFile: options.source, testPath: testFile, runner: options.runner, functions: options.function });
+  if (options.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)` : `Not verified: ${result.reason}`);
+    for (const mutant of result.mutants.filter((item) => !item.killed)) console.log(`  survived: ${mutant.description}`);
+  }
+  return result.verified ? EXIT.ok : EXIT.notVerified;
+}
+
+async function run(argv) {
+  const { command, root, hasPath, options } = parseArgs(argv);
   if (options.help) { console.log(HELP); return EXIT.ok; }
   if (options.version) { console.log(VERSION); return EXIT.ok; }
+  if (command === 'verify') {
+    if (!hasPath) throw new UsageError('verify requires a TEST_FILE');
+    return runVerify(root, options);
+  }
   const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff };
   const result = report(root, scanOptions);
   if (command === 'generate') {
-    const generated = { ...result, findings: generate(result, { write: options.write }) };
-    if (options.json) console.log(JSON.stringify(generated, null, 2));
-    else console.log(`${options.write ? 'Generated' : 'Planned'} ${generated.findings.length} scaffolds`);
+    const generateOptions = { write: options.write, destination: options.destination, runner: options.runner, verify: options.verify };
+    let findings;
+    if (options.llm) {
+      const { default: llm } = await import(pathToFileURL(path.resolve(options.llm)).href);
+      findings = await generateWithLlm(result, { ...generateOptions, llm });
+    } else findings = generate(result, generateOptions);
+    if (options.json) console.log(JSON.stringify({ ...result, findings }, null, 2));
+    else {
+      const count = (status) => findings.filter((item) => item.status === status).length;
+      const tests = count('GENERATED') + count('VERIFIED');
+      console.log(`${options.write ? 'Wrote' : 'Planned'} ${tests} tests (${count('VERIFIED')} verified), ${count('TODO')} TODO notes, ${count('FLAGGED')} flagged`);
+      for (const item of findings.filter((entry) => entry.status === 'TODO').slice(0, 5)) console.log(`  TODO ${item.file}:${item.line} — ${item.reason}`);
+    }
   } else if (options.sarif) console.log(JSON.stringify(toSarif(result, VERSION), null, 2));
   else if (options.json) console.log(JSON.stringify(result, null, 2));
   else if (command === 'score') printScore(result);
   else printFind(result, options);
+  if (result.restored?.length) console.error(`quell: restored ${result.restored.length} source file(s) left mutated by an interrupted verification run`);
   if (result.skipped.length) console.error(`quell: skipped ${result.skipped.length} unparsable file(s): ${result.skipped.slice(0, 3).join(', ')}${result.skipped.length > 3 ? ', …' : ''}`);
   if (options.threshold === undefined) return EXIT.ok;
   if (result.summary.score === null) return result.summary.tier === 'no-findings' ? EXIT.ok : EXIT.notScored;
@@ -65,7 +100,7 @@ function run(argv) {
 }
 
 try {
-  process.exitCode = run(process.argv.slice(2));
+  process.exitCode = await run(process.argv.slice(2));
 } catch (error) {
   const hint = error instanceof UsageError ? '\nRun `quell --help` for usage.' : '';
   console.error(`quell: ${error.code === 'ENOENT' ? `no such file or directory: ${error.path}` : error.message}${hint}`);

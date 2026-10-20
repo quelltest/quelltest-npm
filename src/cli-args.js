@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 
-export const COMMANDS = ['find', 'score', 'generate'];
+export const COMMANDS = ['find', 'score', 'generate', 'verify'];
 
-const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests']);
-const VALUES = new Set(['threshold', 'top', 'coverage', 'diff']);
-const REPEATABLE = new Set(['include', 'exclude']);
+const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify']);
+const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm']);
+const REPEATABLE = new Set(['include', 'exclude', 'function']);
 const ALIASES = { ignore: 'exclude', h: 'help', v: 'version' };
 
 export class UsageError extends Error {}
@@ -17,7 +17,7 @@ function integer(name, value, { min = 0 } = {}) {
 
 /** Parse argv (without node and script). Accepts `--opt value` and `--opt=value`; throws UsageError. */
 export function parseArgs(argv) {
-  const options = { include: [], exclude: [] };
+  const options = { include: [], exclude: [], function: [] };
   const positionals = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -45,5 +45,5 @@ export function parseArgs(argv) {
     throw new UsageError(`unknown command ${JSON.stringify(first)} (expected ${COMMANDS.join(', ')})`);
   }
   if (rest.length > 1) throw new UsageError(`expected at most one PATH, got ${rest.length}`);
-  return { command, root: rest[0] ?? '.', options };
+  return { command, root: rest[0] ?? '.', hasPath: rest.length > 0, options };
 }
