@@ -3,7 +3,7 @@ import fs from 'node:fs';
 export const COMMANDS = ['find', 'score', 'generate', 'verify', 'gate', 'mcp'];
 
 const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify', 'include-covered', 'in-place', 'findings', 'strict']);
-const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm', 'min-score', 'handoff']);
+const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm', 'min-score', 'handoff', 'min-confidence']);
 const REPEATABLE = new Set(['include', 'exclude', 'function']);
 const ALIASES = { ignore: 'exclude', h: 'help', v: 'version' };
 
@@ -37,6 +37,7 @@ export function parseArgs(argv) {
   }
   if (options.threshold !== undefined) options.threshold = integer('threshold', options.threshold);
   if (options.top !== undefined) options.top = integer('top', options.top, { min: 1 });
+  if (options['min-confidence'] !== undefined && !['low', 'medium', 'high'].includes(options['min-confidence'])) throw new UsageError('--min-confidence expects low, medium or high');
   if (options['min-score'] !== undefined) {
     options['min-score'] = integer('min-score', options['min-score']);
     if (options['min-score'] > 100) throw new UsageError('--min-score expects 0-100');

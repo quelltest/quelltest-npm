@@ -200,7 +200,7 @@ const lineAt = (text, offset) => {
  * to verify a test file that already exists at `testPath`. Relative paths are resolved against the current directory.
  */
 export function verifyGenerated(testSource, options = {}) {
-  const { runner = 'node', functions, lines, maxMutants = 30, timeoutMs, minScore = 0 } = options;
+  const { runner = 'node', functions, lines, maxMutants = 30, maxPerKind, timeoutMs, minScore = 0 } = options;
   const unverified = (reason, extra = {}) => ({ verified: false, reason, correctCode: { passed: false }, injectedBug: { passed: false }, mutants: [], killed: 0, total: 0, ignored: 0, mutationScore: null, ...extra });
   if (!options.sourceFile || !fs.existsSync(options.sourceFile)) return unverified('no source file to mutate: pass options.sourceFile');
   const sourceFile = path.resolve(options.sourceFile);
@@ -252,7 +252,7 @@ export function verifyGenerated(testSource, options = {}) {
       return unverified(why, { correctCode, isolation, warnings });
     }
     if (!hasMeaningfulAssertion(source)) return unverified('test has no assertion that observes the code under test', { correctCode, isolation });
-    const { list: candidates, ignored } = mutantsWithStats(original, sourceFile, { functions, lines, max: maxMutants });
+    const { list: candidates, ignored } = mutantsWithStats(original, sourceFile, { functions, lines, max: maxMutants, maxPerKind });
     if (!candidates.length) return unverified('no applicable mutation in the code under test', { correctCode, isolation, ignored });
     const results = [];
     if (!mirror) fs.writeFileSync(sourceFile + BACKUP_SUFFIX, original, 'utf8');
@@ -290,6 +290,7 @@ export function verifyGenerated(testSource, options = {}) {
       verified: reason === null, reason,
       correctCode, injectedBug: { passed: killed > 0 }, mutants: results, killed, total: results.length, inconclusive, ignored, mutationScore,
       isolation, sourceFile, testPath, warnings,
+      byKind: Object.fromEntries([...new Set(results.map((item) => item.kind))].map((kind) => [kind, { total: results.filter((item) => item.kind === kind).length, killed: results.filter((item) => item.kind === kind && item.killed).length }])),
     };
   } finally {
     if (mirror) mirror.cleanup();

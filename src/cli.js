@@ -29,6 +29,7 @@ Options:
   --threshold N          exit ${EXIT.belowThreshold} when the score is below N (${EXIT.notScored} when it cannot be scored)
   --include GLOB         only scan matching files (repeatable)
   --exclude GLOB         skip matching files (repeatable; alias --ignore; also .quellignore)
+  --min-confidence L     only findings at least this trustworthy: low, medium or high
   --include-tests        scan test files too
   --write                generate: write tests (and TODO notes) to disk
   --destination DIR      generate: output directory (default: tests/quelltest)
@@ -52,7 +53,7 @@ function printFind(result, options) {
   const shown = pending.slice(0, limit);
   const covered = result.findings.length - pending.length;
   console.log(`Quell scan — ${pending.length} edge-case candidates${evidence ? ` not executed by tests (${covered} already covered)` : ''}, showing ${shown.length}`);
-  for (const item of shown) console.log(`• ${item.file}:${item.line} [${item.rule ?? item.category}] ${item.function} — ${item.suggestion}`);
+  for (const item of shown) console.log(`• ${item.file}:${item.line} [${item.rule ?? item.category}] ${item.function} — ${item.suggestion} (${item.confidence})`);
   if (pending.length > shown.length) console.log(`… ${pending.length - shown.length} more (use --all or --top N)`);
   if (!evidence) console.log('Coverage evidence: none (pass --coverage FILE to hide candidates your tests already run)');
 }
@@ -108,7 +109,7 @@ async function run(argv) {
     if (!hasPath) throw new UsageError('verify requires a TEST_FILE');
     return runVerify(root, options);
   }
-  const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff };
+  const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff, minConfidence: options['min-confidence'] };
   const result = report(root, scanOptions);
   if (command === 'generate') {
     const generateOptions = { write: options.write, destination: options.destination, runner: options.runner, verify: options.verify, includeCovered: options['include-covered'] };
