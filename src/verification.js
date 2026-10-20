@@ -2,14 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { childNodes, parseSource } from './ast.js';
+import { BACKUP_SUFFIX, restoreIfInterrupted } from './backup.js';
 import { applyMutant, mutants } from './mutate.js';
 
-const BACKUP_SUFFIX = '.quelltest-backup';
-const NON_NODE_RUNNERS = {
-  jest: (file) => ['jest', '--runTestsByPath', file],
-  vitest: (file) => ['vitest', 'run', file],
-  mocha: (file) => ['mocha', file],
+const RUNNER_PACKAGES = {
+  jest: { name: 'jest', args: (file) => ['--runTestsByPath', file] },
+  vitest: { name: 'vitest', args: (file) => ['run', file] },
+  mocha: { name: 'mocha', args: (file) => [file] },
 };
+const ASSERTION_ROOTS = new Set(['assert', 'expect', 't', 'should', 'chai']);
 
 // A parent `node --test` sets NODE_TEST_CONTEXT, which makes a nested `node --test` report success regardless of failures.
 function cleanEnv() {
@@ -18,18 +19,39 @@ function cleanEnv() {
   return env;
 }
 
-/** Run one test file in a subprocess (never in-process: module caches would hide mutations). */
+/** Locate a runner's JavaScript entry point in node_modules (so no shell or npx is involved on any platform). */
+function resolveRunnerEntry(runner, cwd) {
+  const { name } = RUNNER_PACKAGES[runner];
+  for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
+    const manifest = path.join(dir, 'node_modules', name, 'package.json');
+    if (fs.existsSync(manifest)) {
+      const { bin } = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+      const entry = typeof bin === 'string' ? bin : (bin?.[name] ?? Object.values(bin ?? {})[0]);
+      if (entry) return path.join(dir, 'node_modules', name, entry);
+    }
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+/**
+ * Run one test file in a subprocess (never in-process: module caches would hide mutations).
+ * Result: `{ passed }`, or `{ passed: false, timedOut }`, `{ passed: false, infrastructure }` (the runner itself
+ * could not run, which says nothing about the test), or `{ passed: false, error }` for a genuine test failure.
+ */
 export function runTest(testFile, { runner = 'node', cwd = path.dirname(testFile), timeoutMs = 60_000 } = {}) {
+  const spawnOptions = { cwd, env: cleanEnv(), encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 };
   let result;
   if (runner === 'node') {
-    result = spawnSync(process.execPath, ['--test', testFile], { cwd, env: cleanEnv(), encoding: 'utf8', timeout: timeoutMs });
-  } else if (NON_NODE_RUNNERS[runner]) {
-    const windows = process.platform === 'win32';
-    const args = NON_NODE_RUNNERS[runner](windows ? `"${testFile}"` : testFile);
-    result = spawnSync(windows ? 'npx.cmd' : 'npx', ['--no-install', ...args], { cwd, env: cleanEnv(), encoding: 'utf8', timeout: timeoutMs, shell: windows });
+    result = spawnSync(process.execPath, ['--test', testFile], spawnOptions);
+  } else if (RUNNER_PACKAGES[runner]) {
+    const entry = resolveRunnerEntry(runner, cwd);
+    if (!entry) return { passed: false, infrastructure: true, error: `${runner} is not installed in node_modules` };
+    result = spawnSync(process.execPath, [entry, ...RUNNER_PACKAGES[runner].args(testFile)], spawnOptions);
   } else throw new Error(`unsupported runner: ${runner}`);
-  if (result.error?.code === 'ETIMEDOUT' || result.signal) return { passed: false, timedOut: true, error: 'timed out' };
-  return result.status === 0 ? { passed: true } : { passed: false, error: result.error?.message || result.stderr || result.stdout || `exit status ${result.status}` };
+  if (result.error?.code === 'ETIMEDOUT') return { passed: false, timedOut: true, error: 'timed out' };
+  if (result.error) return { passed: false, infrastructure: true, error: result.error.message };
+  if (result.signal) return { passed: false, interrupted: true, error: `terminated by ${result.signal}` };
+  return result.status === 0 ? { passed: true } : { passed: false, error: result.stderr || result.stdout || `exit status ${result.status}` };
 }
 
 /**
@@ -51,19 +73,17 @@ export function hasMeaningfulAssertion(testSource) {
   };
   let found = false;
   const visit = (node) => {
-    if (node.type === 'CallExpression' && ['assert', 'expect'].includes(rootOf(node.callee)) && node.arguments.some(observes)) found = true;
+    if (node.type === 'CallExpression' && ASSERTION_ROOTS.has(rootOf(node.callee)) && node.arguments.some(observes)) found = true;
     for (const child of childNodes(node)) visit(child);
   };
   visit(ast.program);
   return found;
 }
 
-function restoreIfInterrupted(sourceFile) {
-  const backup = sourceFile + BACKUP_SUFFIX;
-  if (fs.existsSync(backup)) {
-    fs.copyFileSync(backup, sourceFile);
-    fs.rmSync(backup);
-  }
+function outcomeOf(run) {
+  if (run.timedOut) return 'timeout';
+  if (run.infrastructure) return 'error';
+  return run.passed ? 'survived' : 'killed';
 }
 
 /**
@@ -72,8 +92,10 @@ function restoreIfInterrupted(sourceFile) {
  * 1. The test must pass on the original source.
  * 2. It must contain an assertion that observes the code (not a placeholder).
  * 3. Mutants of `sourceFile` (optionally only `functions`) are injected one at a time and the test
- *    must fail on at least one. The source is always restored in a `finally`, with an on-disk backup
- *    so an interrupted run is repaired on the next call.
+ *    must fail on at least one. Only genuine test failures count as kills: timeouts and runner
+ *    errors are reported separately. The source is always restored in a `finally`, with an on-disk
+ *    backup so a run killed outright is repaired on the next call (and by `scan`/`generate`).
+ *    A Ctrl-C that reaches the test subprocess aborts the run and restores the source.
  *
  * `testSource` is written to `testPath` for the run and removed afterwards; pass `null` to verify a
  * test file that already exists at `testPath`.
@@ -93,7 +115,7 @@ export function verifyGenerated(testSource, options = {}) {
   if (ownsTest) fs.writeFileSync(testPath, testSource, 'utf8');
   try {
     const correctCode = runTest(testPath, runOptions);
-    if (!correctCode.passed) return unverified('test fails on the original code', { correctCode });
+    if (!correctCode.passed) return unverified(correctCode.infrastructure ? `test runner could not run: ${correctCode.error}` : 'test fails on the original code', { correctCode });
     if (!hasMeaningfulAssertion(source)) return unverified('test has no assertion that observes the code under test', { correctCode });
     const candidates = mutants(original, sourceFile, { functions, max: maxMutants });
     if (!candidates.length) return unverified('no applicable mutation in the code under test', { correctCode });
@@ -103,16 +125,22 @@ export function verifyGenerated(testSource, options = {}) {
       for (const mutant of candidates) {
         fs.writeFileSync(sourceFile, applyMutant(original, mutant), 'utf8');
         const run = runTest(testPath, runOptions);
-        results.push({ description: mutant.description, line: mutant.line, function: mutant.function, killed: !run.passed });
+        if (run.interrupted) throw new Error(`verification interrupted: ${run.error}`);
+        results.push({ description: mutant.description, line: mutant.line, function: mutant.function, outcome: outcomeOf(run), killed: outcomeOf(run) === 'killed' });
       }
     } finally {
       fs.writeFileSync(sourceFile, original, 'utf8');
       fs.rmSync(sourceFile + BACKUP_SUFFIX, { force: true });
     }
     const killed = results.filter((item) => item.killed).length;
+    const decided = results.filter((item) => item.outcome === 'killed' || item.outcome === 'survived').length;
+    const inconclusive = results.length - decided;
+    let reason = null;
+    if (killed === 0) reason = inconclusive ? `no mutant was killed (${inconclusive} timed out or could not run)` : 'test passes on every mutant of the code under test';
     return {
-      verified: killed > 0, reason: killed > 0 ? null : 'test passes on every mutant of the code under test',
-      correctCode, injectedBug: { passed: killed > 0 }, mutants: results, killed, total: results.length, mutationScore: Math.round((killed / results.length) * 100),
+      verified: killed > 0, reason,
+      correctCode, injectedBug: { passed: killed > 0 }, mutants: results, killed, total: results.length, inconclusive,
+      mutationScore: decided ? Math.round((killed / decided) * 100) : null,
     };
   } finally {
     if (ownsTest) fs.rmSync(testPath, { force: true });

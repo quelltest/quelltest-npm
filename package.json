@@ -22,7 +22,7 @@
   "scripts": {
     "test": "node --test",
     "test:verify": "node scripts/verification-smoke.mjs",
-    "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check src/scan.js && node --check src/files.js && node --check src/ast.js && node --check src/mutate.js && node --check src/score.js && node --check src/diff.js && node --check src/sarif.js && node --check src/coverage.js && node --check src/cli-args.js && node --check scripts/verification-smoke.mjs",
+    "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check src/scan.js && node --check src/files.js && node --check src/ast.js && node --check src/backup.js && node --check src/mutate.js && node --check src/score.js && node --check src/diff.js && node --check src/sarif.js && node --check src/coverage.js && node --check src/cli-args.js && node --check scripts/verification-smoke.mjs",
     "pack:check": "npm pack --dry-run",
     "test:ci": "npm test && npm run test:verify && npm run check && npm run pack:check"
   },

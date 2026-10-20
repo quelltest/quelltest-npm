@@ -5,8 +5,8 @@ import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from
-const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3 };
+// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from · 4 verify: test not verified
+const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3, notVerified: 4 };
 
 const HELP = `Usage: quell <${COMMANDS.join('|')}> [PATH] [options]
        quell verify TEST_FILE --source FILE [--function NAME] [--runner NAME]
@@ -56,7 +56,7 @@ function runVerify(testFile, options) {
     console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)` : `Not verified: ${result.reason}`);
     for (const mutant of result.mutants.filter((item) => !item.killed)) console.log(`  survived: ${mutant.description}`);
   }
-  return result.verified ? EXIT.ok : EXIT.belowThreshold;
+  return result.verified ? EXIT.ok : EXIT.notVerified;
 }
 
 function run(argv) {
@@ -77,6 +77,7 @@ function run(argv) {
   else if (options.json) console.log(JSON.stringify(result, null, 2));
   else if (command === 'score') printScore(result);
   else printFind(result, options);
+  if (result.restored?.length) console.error(`quell: restored ${result.restored.length} source file(s) left mutated by an interrupted verification run`);
   if (result.skipped.length) console.error(`quell: skipped ${result.skipped.length} unparsable file(s): ${result.skipped.slice(0, 3).join(', ')}${result.skipped.length > 3 ? ', …' : ''}`);
   if (options.threshold === undefined) return EXIT.ok;
   if (result.summary.score === null) return result.summary.tier === 'no-findings' ? EXIT.ok : EXIT.notScored;
