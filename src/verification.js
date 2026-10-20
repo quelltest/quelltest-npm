@@ -43,11 +43,16 @@ function resolveRunnerEntry(runner, cwd) {
  * Result: `{ passed, command }`, or `{ passed: false, timedOut }`, `{ passed: false, infrastructure }` (the runner itself
  * could not run, which says nothing about the test), or `{ passed: false, error }` for a genuine test failure.
  */
-export function runTest(testFile, { runner = 'node', cwd = path.dirname(testFile), timeoutMs = 60_000 } = {}) {
+export function runTest(testFile, { runner = 'node', cwd = path.dirname(testFile), timeoutMs = 60_000, command: custom } = {}) {
   const spawnOptions = { cwd, env: cleanEnv(), encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 };
   let result;
   let command;
-  if (runner === 'node') {
+  if (custom) {
+    // The user's own command (for example one that starts Testcontainers or an in-memory server). It is theirs, so it
+    // runs through the shell; only the quoted test path is substituted.
+    command = custom.replaceAll('{test}', `"${testFile}"`);
+    result = spawnSync(command, { ...spawnOptions, shell: true });
+  } else if (runner === 'node') {
     command = `node --test ${testFile}`;
     result = spawnSync(process.execPath, ['--test', testFile], spawnOptions);
   } else if (RUNNER_PACKAGES[runner]) {
@@ -142,7 +147,14 @@ function createMirror(root, keep = []) {
     } catch {
       try { fs.rmdirSync(link); } catch { /* no link */ }
     }
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    // Best effort: after a timeout a child process may still hold the directory (Windows). The OS cleans the temp folder
+    // eventually; a failed cleanup must never fail or hide the verification result.
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      return false;
+    }
+    return true;
   };
   try {
     // dereference: a symlinked source file must become a real file in the copy, or writing a mutant would write through the link.
@@ -197,11 +209,14 @@ const lineAt = (text, offset) => {
  * `inPlace: true` is set, the source is mutated in place and always restored in a `finally`, with an on-disk backup so
  * a run killed outright is repaired on the next call (and by `scan`/`generate`). `result.isolation` says which was used.
  *
+ * `command` replaces the runner with your own command (`{test}` is replaced by the test path), for example one that runs
+ * integration tests against Testcontainers or an in-memory database, so that mutants are measured against real dependencies.
+ *
  * `testSource` is written to `testPath` for the run (in the copy when isolated) and removed afterwards; pass `null`
  * to verify a test file that already exists at `testPath`. Relative paths are resolved against the current directory.
  */
 export function verifyGenerated(testSource, options = {}) {
-  const { runner = 'node', functions, lines, maxMutants = 30, maxPerKind, timeoutMs, minScore = 0 } = options;
+  const { runner = 'node', functions, lines, maxMutants = 30, maxPerKind, timeoutMs, minScore = 0, command } = options;
   const unverified = (reason, extra = {}) => ({ verified: false, reason, correctCode: { passed: false }, injectedBug: { passed: false }, mutants: [], killed: 0, total: 0, ignored: 0, mutationScore: null, ...extra });
   if (!options.sourceFile || !fs.existsSync(options.sourceFile)) return unverified('no source file to mutate: pass options.sourceFile');
   const sourceFile = path.resolve(options.sourceFile);
@@ -232,7 +247,7 @@ export function verifyGenerated(testSource, options = {}) {
   const runSource = map(sourceFile);
   const runTestPath = map(testPath);
   const cwd = path.resolve(options.cwd ?? path.dirname(sourceFile));
-  const runOptions = { runner, cwd: map(cwd), timeoutMs };
+  const runOptions = { runner, cwd: map(cwd), timeoutMs, command };
 
   // In place, writing `testSource` to an existing file would destroy it (the finally block deletes it afterwards).
   if (ownsTest && !mirror && fs.existsSync(runTestPath)) return unverified(`refusing to overwrite the existing file ${runTestPath}: pass testSource: null to verify it, or use another testPath`, { isolation, warnings });
