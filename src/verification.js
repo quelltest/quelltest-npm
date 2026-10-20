@@ -12,6 +12,7 @@ const RUNNER_PACKAGES = {
   mocha: { name: 'mocha', args: (file) => [file] },
 };
 const ASSERTION_ROOTS = new Set(['assert', 'expect', 't', 'should', 'chai']);
+// Skipped only below the mirrored root and never when they hold the source or test (a source in src/build/ must be copied).
 const MIRROR_SKIP = new Set(['node_modules', '.git', 'coverage', 'dist', 'build', '.next', '.cache', '.turbo']);
 const MIRROR_LIMITS = { files: 20_000, bytes: 200 * 1024 * 1024 };
 
@@ -109,13 +110,14 @@ function commonAncestor(a, b) {
   return shared.join(path.sep) || path.sep;
 }
 
+const tooBroad = (dir) => dir === path.parse(dir).root || dir === os.homedir() || dir.split(path.sep).filter(Boolean).length < 2;
+
 /** Directory to mirror: the package containing both files, else their common ancestor (never a filesystem root or home). */
 function mirrorRoot(sourceFile, testPath) {
   const pkg = packageRoot(path.dirname(sourceFile));
-  if (pkg && (testPath === pkg || isInside(pkg, testPath))) return pkg;
+  if (pkg && !tooBroad(pkg) && (testPath === pkg || isInside(pkg, testPath))) return pkg;
   const common = commonAncestor(path.dirname(sourceFile), path.dirname(testPath));
-  const tooBroad = common === path.parse(common).root || common === os.homedir() || common.split(path.sep).filter(Boolean).length < 2;
-  return tooBroad ? null : common;
+  return tooBroad(common) ? null : common;
 }
 
 function nearestNodeModules(root) {
@@ -127,7 +129,7 @@ function nearestNodeModules(root) {
 }
 
 /** Copy `root` (without node_modules/.git/build output) to a temp dir and link node_modules. Throws if the copy is too large. */
-function createMirror(root) {
+function createMirror(root, keep = []) {
   // Use the real path: jest and vitest crawl the project root and mis-handle symlinked (/var -> /private/var) or 8.3 short (RUNNER~1) temp paths.
   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'quell-verify-')));
   let files = 0;
@@ -142,10 +144,13 @@ function createMirror(root) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   };
   try {
+    // dereference: a symlinked source file must become a real file in the copy, or writing a mutant would write through the link.
     fs.cpSync(root, dir, {
       recursive: true,
+      dereference: true,
       filter: (source) => {
-        if (MIRROR_SKIP.has(path.basename(source)) || source.endsWith(BACKUP_SUFFIX)) return false;
+        const holdsKept = keep.some((file) => file === source || isInside(source, file));
+        if ((source !== root && MIRROR_SKIP.has(path.basename(source)) && !holdsKept) || source.endsWith(BACKUP_SUFFIX)) return false;
         const stat = fs.lstatSync(source);
         if (stat.isDirectory()) return true;
         files += 1;
@@ -207,15 +212,17 @@ export function verifyGenerated(testSource, options = {}) {
   const original = fs.readFileSync(sourceFile, 'utf8');
   const source = ownsTest ? testSource : fs.readFileSync(testPath, 'utf8');
 
+  const warnings = [];
   let root = null;
   let mirror = null;
   if (!options.inPlace) {
     root = mirrorRoot(sourceFile, testPath);
     if (root) {
       try {
-        mirror = createMirror(root);
-      } catch {
+        mirror = createMirror(root, [sourceFile, testPath]);
+      } catch (error) {
         mirror = null;
+        warnings.push(`could not mirror the project (${error.message}); mutating the source in place instead (restored afterwards)`);
       }
     }
   }
@@ -226,15 +233,23 @@ export function verifyGenerated(testSource, options = {}) {
   const cwd = path.resolve(options.cwd ?? path.dirname(sourceFile));
   const runOptions = { runner, cwd: map(cwd), timeoutMs };
 
+  // In place, writing `testSource` to an existing file would destroy it (the finally block deletes it afterwards).
+  if (ownsTest && !mirror && fs.existsSync(runTestPath)) return unverified(`refusing to overwrite the existing file ${runTestPath}: pass testSource: null to verify it, or use another testPath`, { isolation, warnings });
+  const breakLink = (file) => {
+    try {
+      if (fs.lstatSync(file).isSymbolicLink()) fs.unlinkSync(file);
+    } catch { /* does not exist yet */ }
+  };
   if (ownsTest) {
     fs.mkdirSync(path.dirname(runTestPath), { recursive: true });
+    if (mirror) breakLink(runTestPath);
     fs.writeFileSync(runTestPath, testSource, 'utf8');
   }
   try {
     const correctCode = runTest(runTestPath, runOptions);
     if (!correctCode.passed) {
       const why = correctCode.infrastructure ? `test runner could not run: ${correctCode.error}` : `test fails on the original code (${correctCode.command}): ${excerpt(correctCode)}`;
-      return unverified(why, { correctCode, isolation });
+      return unverified(why, { correctCode, isolation, warnings });
     }
     if (!hasMeaningfulAssertion(source)) return unverified('test has no assertion that observes the code under test', { correctCode, isolation });
     const { list: candidates, ignored } = mutantsWithStats(original, sourceFile, { functions, lines, max: maxMutants });
@@ -242,6 +257,7 @@ export function verifyGenerated(testSource, options = {}) {
     const results = [];
     if (!mirror) fs.writeFileSync(sourceFile + BACKUP_SUFFIX, original, 'utf8');
     try {
+      if (mirror) breakLink(runSource);
       for (const mutant of candidates) {
         const mutated = applyMutant(original, mutant);
         fs.writeFileSync(runSource, mutated, 'utf8');
@@ -257,6 +273,10 @@ export function verifyGenerated(testSource, options = {}) {
       if (!mirror) {
         fs.writeFileSync(sourceFile, original, 'utf8');
         fs.rmSync(sourceFile + BACKUP_SUFFIX, { force: true });
+      } else if (fs.readFileSync(sourceFile, 'utf8') !== original) {
+        // Defence in depth: isolation must never leave the real source changed.
+        fs.writeFileSync(sourceFile, original, 'utf8');
+        warnings.push('the real source file changed during verification and was restored');
       }
     }
     const killed = results.filter((item) => item.killed).length;
@@ -269,7 +289,7 @@ export function verifyGenerated(testSource, options = {}) {
     return {
       verified: reason === null, reason,
       correctCode, injectedBug: { passed: killed > 0 }, mutants: results, killed, total: results.length, inconclusive, ignored, mutationScore,
-      isolation, sourceFile, testPath,
+      isolation, sourceFile, testPath, warnings,
     };
   } finally {
     if (mirror) mirror.cleanup();

@@ -240,8 +240,10 @@ test('handoff report lists survivors with diff and a specific instruction', asyn
   assert.match(markdown, /```diff/);
   assert.match(markdown, /\*\*What to do:\*\*/);
   assert.match(markdown, /quell-ignore-mutant/);
-  const clean = renderHandoff(verifyGenerated(STRONG, { sourceFile, testPath }), { sourceText: SOURCE });
-  assert.ok(/No surviving mutants|surviving mutant/.test(clean));
+  const strongResult = verifyGenerated(STRONG, { sourceFile, testPath });
+  const survivors = strongResult.mutants.filter((mutant) => mutant.outcome === 'survived').length;
+  const clean = renderHandoff(strongResult, { sourceText: SOURCE });
+  assert.match(clean, survivors ? new RegExp(`${survivors} surviving mutant`) : /No surviving mutants/);
   const cli = path.resolve('src/cli.js');
   const out = path.join(path.dirname(sourceFile), 'handoff.md');
   fs.writeFileSync(testPath, partial);

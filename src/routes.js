@@ -2,6 +2,11 @@ import { FUNCTION_TYPES, ROUTE_METHODS, childNodes, propertyName } from './ast.j
 
 const SOURCES = new Set(['body', 'query', 'params']);
 const RELATIONAL = new Set(['<', '>', '<=', '>=', '===', '!==', '==', '!=']);
+const COMPARE = {
+  '<': (a, b) => a < b, '>': (a, b) => a > b, '<=': (a, b) => a <= b, '>=': (a, b) => a >= b,
+  '===': (a, b) => a === b, '!==': (a, b) => a !== b, '==': (a, b) => a === b, '!=': (a, b) => a !== b,
+};
+const FLIP = { '<': '>', '>': '<', '<=': '>=', '>=': '<=', '===': '===', '!==': '!==', '==': '==', '!=': '!=' };
 
 function* descendants(node) {
   yield node;
@@ -106,7 +111,9 @@ export function requestCases(route) {
         const target = requestField(left, fields) ?? requestField(term.right, fields);
         const literal = literalValue(requestField(left, fields) ? term.right : left);
         if (target && literal && typeof literal.value === 'number') {
-          for (const value of [literal.value - 1, literal.value, literal.value + 1]) add({ ...target, case: 'boundary', value, expect: `${expect} when the condition \`${term.operator} ${literal.value}\` holds` });
+          // The guard rejects only the values that satisfy its condition; the neighbours on the other side are accepted.
+          const operator = requestField(left, fields) ? term.operator : FLIP[term.operator];
+          for (const value of [literal.value - 1, literal.value, literal.value + 1]) add({ ...target, case: 'boundary', value, expect: COMPARE[operator](value, literal.value) ? expect : 'acceptance (the guard does not fire)' });
         } else if (target && literal) add({ ...target, case: 'boundary', value: literal.value, expect });
       }
     }

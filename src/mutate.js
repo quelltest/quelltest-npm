@@ -6,8 +6,10 @@ const OPERATOR_SWAPS = {
   '+': '-', '-': '+', '*': '/',
   '&&': '||', '||': '&&', '??': '||',
 };
-// Protections the rule pack looks for: wrapping calls that sanitise or coerce untrusted input.
-const SANITIZER_CALL = /^(?:escape\w*|sanitiz\w*|String|Number|parseInt|parseFloat|encodeURIComponent|encodeURI|basename|(?:path\.)?basename|normalize)$/i;
+// Protections the rule pack looks for: wrapping calls that sanitise untrusted input (tried first) or merely coerce it
+// (`String(x)` is often an equivalent mutant, so it is tried later).
+const SANITIZING_CALL = /^(?:escape\w*|sanitiz\w*|basename|encodeURI\w*|normalize)$/i;
+const COERCING_CALL = /^(?:String|Number|parseInt|parseFloat)$/;
 // Lower number = tried first when the cap cuts the list: mutants aimed at risky code come before generic operator flips.
 const PRIORITY = { sanitizer: 0, await: 0, nullish: 1, guard: 2, throw: 2, operator: 3 };
 const IGNORE_MUTANT = /quell-ignore-mutant/;
@@ -48,7 +50,7 @@ export function mutantsWithStats(text, file, options = {}) {
   const out = [];
   let ignored = 0;
   const frames = [{ name: '<module>' }];
-  const add = (node, kind, start, end, replacement, description) => {
+  const add = (node, kind, start, end, replacement, description, priority = PRIORITY[kind]) => {
     if (wanted && !wanted.has(frames.at(-1).name)) return;
     const line = node.loc.start.line;
     if (options.lines && !inRanges(line, options.lines)) return;
@@ -56,7 +58,7 @@ export function mutantsWithStats(text, file, options = {}) {
       ignored += 1;
       return;
     }
-    out.push({ id: `${start}:${end}:${replacement}`, kind, line, start, end, replacement, description: `${description} (line ${line})`, function: frames.at(-1).name });
+    out.push({ id: `${start}:${end}:${replacement}`, kind, priority, line, start, end, replacement, description: `${description} (line ${line})`, function: frames.at(-1).name });
   };
   const visit = (node, parent) => {
     const isFunction = FUNCTION_TYPES.has(node.type);
@@ -72,20 +74,25 @@ export function mutantsWithStats(text, file, options = {}) {
     }
     if (node.type === 'IfStatement') add(node, 'guard', node.test.start, node.test.end, 'false', 'guard removed');
     if (node.type === 'ThrowStatement') add(node, 'throw', node.start, node.end, ';', 'throw removed');
-    if (node.type === 'AwaitExpression' && frames.length > 1) {
+    // `return await x` is equivalent to `return x` outside try/catch, so it is not worth a mutant.
+    if (node.type === 'AwaitExpression' && frames.length > 1 && parent?.type !== 'ReturnStatement') {
       const end = node.argument.extra?.parenthesized ? node.argument.extra.parenStart : node.argument.start;
       add(node, 'await', node.start, end, '', 'await removed');
     }
     if (node.type === 'CallExpression' && node.arguments.length === 1 && node.arguments[0].type !== 'SpreadElement') {
       const callee = node.callee.type === 'Identifier' ? node.callee.name : (node.callee.type === 'MemberExpression' ? `${node.callee.object.name ?? ''}.${propertyName(node.callee)}` : '');
-      if (SANITIZER_CALL.test(callee)) add(node, 'sanitizer', node.start, node.end, text.slice(node.arguments[0].start, node.arguments[0].end), `sanitiser ${callee}() unwrapped`);
+      const last = callee.split('.').pop();
+      const argument = text.slice(node.arguments[0].start, node.arguments[0].end);
+      if (SANITIZING_CALL.test(last)) add(node, 'sanitizer', node.start, node.end, argument, `sanitiser ${callee}() unwrapped`);
+      else if (COERCING_CALL.test(last)) add(node, 'sanitizer', node.start, node.end, argument, `coercion ${callee}() unwrapped`, 1);
     }
     for (const child of childNodes(node)) visit(child, node);
     if (isFunction) frames.pop();
   };
   visit(ast.program, null);
-  const unique = [...new Map(out.map((m) => [m.id, m])).values()];
-  unique.sort((a, b) => PRIORITY[a.kind] - PRIORITY[b.kind] || a.start - b.start);
+  // A mutant that does not parse would make any runner fail and be miscounted as a kill (`a && b || 0` -> `a && b ?? 0`).
+  const unique = [...new Map(out.map((m) => [m.id, m])).values()].filter((m) => parseSource(applyMutant(text, m), file));
+  unique.sort((a, b) => a.priority - b.priority || a.start - b.start);
   return { list: unique.slice(0, options.max ?? 30), ignored };
 }
 

@@ -73,7 +73,14 @@ const HANDLERS = {
 
 /** Handle one JSON-RPC message. Returns the response object, or null for notifications. */
 export function handleMessage(message) {
+  if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+    return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'invalid request: expected a single JSON-RPC object (batches are not supported)' } };
+  }
   const { id, method, params } = message;
+  if (typeof method !== 'string') {
+    // A response to a request we never sent, or a malformed message: answer only when it has an id to answer to.
+    return 'result' in message || 'error' in message || id === undefined ? null : { jsonrpc: '2.0', id, error: { code: -32600, message: 'invalid request: missing method' } };
+  }
   const reply = (result) => ({ jsonrpc: '2.0', id, result });
   const fail = (code, messageText) => ({ jsonrpc: '2.0', id, error: { code, message: messageText } });
   if (id === undefined) return null; // notification (for example notifications/initialized)
@@ -111,7 +118,12 @@ export function serve(input = process.stdin, output = process.stdout) {
         output.write(`${JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } })}\n`);
         return;
       }
-      const response = handleMessage(message);
+      let response;
+      try {
+        response = handleMessage(message);
+      } catch (error) {
+        response = { jsonrpc: '2.0', id: message?.id ?? null, error: { code: -32603, message: `internal error: ${error.message}` } };
+      }
       if (response) output.write(`${JSON.stringify(response)}\n`);
     });
     lines.on('close', resolve);

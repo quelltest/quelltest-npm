@@ -19,7 +19,11 @@ Repositioned as the free, offline gate for AI-written tests (see `docs/agents.md
 - Findings are ranked by per-rule risk; `falsy-fallback` fires only for numeric defaults; `nullish` ignores code that already has a fallback or guard; `unguarded-call` respects `asyncHandler`-style wrappers.
 - README rewritten around the verifier; honest comparison with Stryker, Flawd and LLM generators.
 
-### Fixed
+### Fixed (from the independent review of this release)
+- Verification can no longer write through a symlinked source file; sources under `build/`/`dist/` are mirrored; mutants that do not parse are dropped instead of counted as kills; `return await` and plain coercions are no longer prioritised equivalent mutants; refuses to overwrite an existing test in place; warns when it falls back to in-place.
+- Scanner: per-sink sanitisers, whole-body vs single-field taint, reassignment and parameter shadowing, same-site redirects, route/i18n constants, `process.env` defaults; `quell-ignore-mutant` no longer suppresses scanner findings.
+- Gate: git renames, `describe.only`, template-literal and repeated test names, `expect.assertions`/`t.mock`/`t.plan` no longer counted, unparsable files are errors; the PR workflow's gate step now fails the job.
+- MCP: malformed messages, batches and stray responses are handled without crashing.
 - Nothing in 0.2.0's behaviour was removed. New exit codes: 4 (`verify` not verified, 0.2.0) and 5 (`gate`).
 
 ## 0.2.0

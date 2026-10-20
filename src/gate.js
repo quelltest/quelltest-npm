@@ -10,6 +10,9 @@ const SKIPPED_ROOTS = new Set(['xit', 'xtest', 'xdescribe']);
 const WEAK_MATCHERS = new Set(['ok', 'toBeTruthy', 'toBeFalsy', 'toBeDefined', 'truthy', 'isTruthy', 'true']);
 const NEGATED_WEAK = new Set(['toBeNull', 'toBeUndefined', 'toBeFalsy', 'toBeNaN']);
 const ASSERT_ROOTS = new Set(['assert', 'expect', 't', 'should', 'chai']);
+// `expect.assertions(1)`, asymmetric matchers and `t.mock`/`t.plan`/`t.test` are not assertions about behaviour.
+const NOT_EXPECT_MATCHERS = new Set(['assertions', 'hasAssertions', 'extend', 'any', 'anything', 'objectContaining', 'arrayContaining', 'stringContaining', 'stringMatching', 'closeTo', 'addSnapshotSerializer']);
+const NODE_ASSERT_METHODS = new Set(['equal', 'deepEqual', 'strictEqual', 'deepStrictEqual', 'notEqual', 'notStrictEqual', 'notDeepEqual', 'notDeepStrictEqual', 'ok', 'true', 'throws', 'rejects', 'doesNotThrow', 'doesNotReject', 'match', 'doesNotMatch', 'is', 'not', 'same', 'like']);
 const ALLOW = /quell-allow-weaken/;
 
 function rootOf(callee) {
@@ -50,10 +53,18 @@ function strengthOf(callNode) {
   return 'strong';
 }
 
+/** Test name as written: strings, and template literals with their `${...}` parts kept as markers (`works ${n}`). */
 const staticName = (node) => {
   if (node?.type === 'StringLiteral') return node.value;
-  if (node?.type === 'TemplateLiteral' && node.expressions.length === 0) return node.quasis[0].value.cooked;
+  if (node?.type === 'TemplateLiteral') return node.quasis.map((quasi, index) => quasi.value.raw + (index < node.expressions.length ? '${…}' : '')).join('');
   return null;
+};
+
+const isAssertionCall = (inner, chain, callee) => {
+  if (inner === 'expect') return chain.length > 0 && callee.type !== 'Identifier' && !NOT_EXPECT_MATCHERS.has(chain[0]);
+  if (inner === 'assert') return true;
+  if (inner === 't') return chain.includes('assert') || NODE_ASSERT_METHODS.has(chain.at(-1));
+  return ASSERT_ROOTS.has(inner) && chain.length > 0;
 };
 
 /** Parse a test file into `Map<testPath, { assertions, skipped, only, line, endLine }>`. */
@@ -63,7 +74,7 @@ export function analyzeTests(text, file = 'a.test.js') {
   const tests = new Map();
   const lines = text.split('\n');
 
-  const visit = (node, suites, suiteSkipped) => {
+  const visit = (node, suites, suiteSkipped, suiteOnly = false) => {
     if (node.type === 'CallExpression') {
       const root = rootOf(node.callee);
       const chain = methodChain(node.callee);
@@ -73,10 +84,10 @@ export function analyzeTests(text, file = 'a.test.js') {
       if (isTest || isSuite) {
         const optionSkip = node.arguments.some((arg) => arg.type === 'ObjectExpression' && arg.properties.some((prop) => ['skip', 'todo'].includes(prop.key?.name) && prop.value?.value !== false));
         const skipped = suiteSkipped || SKIPPED_ROOTS.has(root) || chain.includes('skip') || chain.includes('todo') || optionSkip;
-        const only = chain.includes('only');
+        const only = suiteOnly || chain.includes('only');
         const body = [...node.arguments].reverse().find((arg) => FUNCTION_TYPES.has(arg.type));
         if (isSuite) {
-          if (body) visit(body.body, [...suites, name], skipped);
+          if (body) visit(body.body, [...suites, name], skipped, only);
           return;
         }
         const assertions = [];
@@ -84,8 +95,7 @@ export function analyzeTests(text, file = 'a.test.js') {
           if (current.type === 'CallExpression') {
             const inner = rootOf(current.callee);
             const innerChain = methodChain(current.callee);
-            const isMatcherCall = inner === 'expect' ? innerChain.length > 0 : ASSERT_ROOTS.has(inner) && (innerChain.length > 0 || inner === 'assert');
-            if (isMatcherCall && !(inner === 'expect' && current.callee.type === 'Identifier')) {
+            if (isAssertionCall(inner, innerChain, current.callee)) {
               // outermost call of a chain only: skip the inner `expect(x)` call itself
               assertions.push({ method: innerChain.at(-1) ?? inner, strength: strengthOf(current), literals: literalsIn(current), line: current.loc.start.line });
               return;
@@ -96,14 +106,17 @@ export function analyzeTests(text, file = 'a.test.js') {
         if (body) collect(body.body);
         const first = node.loc.start.line;
         const last = node.loc.end.line;
-        tests.set([...suites, name].join(' > '), {
+        const baseKey = [...suites, name].join(' > ');
+        let key = baseKey;
+        for (let ordinal = 2; tests.has(key); ordinal += 1) key = `${baseKey} #${ordinal}`; // repeated names stay distinct
+        tests.set(key, {
           assertions, skipped, only, line: first, endLine: last,
           allowed: lines.slice(first - 1, last).some((line) => ALLOW.test(line)),
         });
         return;
       }
     }
-    for (const child of childNodes(node)) visit(child, suites, suiteSkipped);
+    for (const child of childNodes(node)) visit(child, suites, suiteSkipped, suiteOnly);
   };
   visit(ast.program, [], false);
   return tests;
@@ -120,7 +133,7 @@ const signature = (test) => test.assertions.map((item) => `${item.method}:${JSON
 export function compareTests(baseText, headText, file) {
   const issues = [];
   const base = analyzeTests(baseText, file);
-  if (!base) return issues;
+  if (!base) return [{ file, test: '*', kind: 'unparsable', severity: 'error', line: 1, message: 'the test file at the base could not be parsed, so it cannot be compared' }];
   if (headText === null) {
     for (const [name, test] of base) if (test.assertions.length) issues.push({ file, test: name, kind: 'test-file-deleted', severity: 'error', line: 1, message: `test file deleted (it had ${base.size} test(s))` });
     if (!issues.length && base.size) issues.push({ file, test: '*', kind: 'test-file-deleted', severity: 'error', line: 1, message: 'test file deleted' });
@@ -128,7 +141,7 @@ export function compareTests(baseText, headText, file) {
   }
   const head = analyzeTests(headText, file);
   if (!head) {
-    issues.push({ file, test: '*', kind: 'unparsable', severity: 'review', line: 1, message: 'the changed test file could not be parsed' });
+    issues.push({ file, test: '*', kind: 'unparsable', severity: 'error', line: 1, message: 'the changed test file could not be parsed' });
     return issues;
   }
   const unmatchedHead = new Map([...head].filter(([name]) => !base.has(name)));
@@ -171,9 +184,9 @@ export function compareTests(baseText, headText, file) {
 export function gate(ref, { cwd = process.cwd(), strict = false } = {}) {
   const issues = [];
   let checked = 0;
-  for (const entry of changedFiles(ref, cwd)) {
+  const isChangedTest = (file) => /\.[cm]?[jt]sx?$/.test(file) && isTestFile(file.replaceAll('\\', '/'));
+  for (const entry of changedFiles(ref, cwd, isChangedTest)) {
     const relative = entry.file.replaceAll('\\', '/');
-    if (!/\.[cm]?[jt]sx?$/.test(relative) || !isTestFile(relative)) continue;
     if (entry.status === 'A') continue;
     checked += 1;
     const absolute = path.join(entry.root, entry.file);
