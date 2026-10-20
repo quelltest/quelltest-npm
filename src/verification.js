@@ -1,9 +1,10 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { childNodes, parseSource } from './ast.js';
 import { BACKUP_SUFFIX, restoreIfInterrupted } from './backup.js';
-import { applyMutant, mutants } from './mutate.js';
+import { applyMutant, mutantsWithStats } from './mutate.js';
 
 const RUNNER_PACKAGES = {
   jest: { name: 'jest', args: (file) => ['--runTestsByPath', file] },
@@ -11,6 +12,8 @@ const RUNNER_PACKAGES = {
   mocha: { name: 'mocha', args: (file) => [file] },
 };
 const ASSERTION_ROOTS = new Set(['assert', 'expect', 't', 'should', 'chai']);
+const MIRROR_SKIP = new Set(['node_modules', '.git', 'coverage', 'dist', 'build', '.next', '.cache', '.turbo']);
+const MIRROR_LIMITS = { files: 20_000, bytes: 200 * 1024 * 1024 };
 
 // A parent `node --test` sets NODE_TEST_CONTEXT, which makes a nested `node --test` report success regardless of failures.
 function cleanEnv() {
@@ -35,23 +38,27 @@ function resolveRunnerEntry(runner, cwd) {
 
 /**
  * Run one test file in a subprocess (never in-process: module caches would hide mutations).
- * Result: `{ passed }`, or `{ passed: false, timedOut }`, `{ passed: false, infrastructure }` (the runner itself
+ * Result: `{ passed, command }`, or `{ passed: false, timedOut }`, `{ passed: false, infrastructure }` (the runner itself
  * could not run, which says nothing about the test), or `{ passed: false, error }` for a genuine test failure.
  */
 export function runTest(testFile, { runner = 'node', cwd = path.dirname(testFile), timeoutMs = 60_000 } = {}) {
   const spawnOptions = { cwd, env: cleanEnv(), encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 };
   let result;
+  let command;
   if (runner === 'node') {
+    command = `node --test ${testFile}`;
     result = spawnSync(process.execPath, ['--test', testFile], spawnOptions);
   } else if (RUNNER_PACKAGES[runner]) {
     const entry = resolveRunnerEntry(runner, cwd);
-    if (!entry) return { passed: false, infrastructure: true, error: `${runner} is not installed in node_modules` };
-    result = spawnSync(process.execPath, [entry, ...RUNNER_PACKAGES[runner].args(testFile)], spawnOptions);
+    if (!entry) return { passed: false, infrastructure: true, command: runner, error: `${runner} is not installed in node_modules` };
+    const args = RUNNER_PACKAGES[runner].args(testFile);
+    command = `node ${entry} ${args.join(' ')}`;
+    result = spawnSync(process.execPath, [entry, ...args], spawnOptions);
   } else throw new Error(`unsupported runner: ${runner}`);
-  if (result.error?.code === 'ETIMEDOUT') return { passed: false, timedOut: true, error: 'timed out' };
-  if (result.error) return { passed: false, infrastructure: true, error: result.error.message };
-  if (result.signal) return { passed: false, interrupted: true, error: `terminated by ${result.signal}` };
-  return result.status === 0 ? { passed: true } : { passed: false, error: result.stderr || result.stdout || `exit status ${result.status}` };
+  if (result.error?.code === 'ETIMEDOUT') return { passed: false, timedOut: true, command, error: 'timed out' };
+  if (result.error) return { passed: false, infrastructure: true, command, error: result.error.message };
+  if (result.signal) return { passed: false, interrupted: true, command, error: `terminated by ${result.signal}` };
+  return result.status === 0 ? { passed: true, command } : { passed: false, command, error: result.stderr || result.stdout || `exit status ${result.status}` };
 }
 
 /**
@@ -80,69 +87,191 @@ export function hasMeaningfulAssertion(testSource) {
   return found;
 }
 
+// --- isolation: verify in a throwaway copy so the real source is never modified --------------------------------
+
+const isInside = (parent, child) => {
+  const relative = path.relative(parent, child);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+};
+
+function packageRoot(startDir) {
+  for (let dir = startDir; ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+function commonAncestor(a, b) {
+  const left = a.split(path.sep);
+  const right = b.split(path.sep);
+  const shared = [];
+  for (let i = 0; i < Math.min(left.length, right.length) && left[i] === right[i]; i += 1) shared.push(left[i]);
+  return shared.join(path.sep) || path.sep;
+}
+
+/** Directory to mirror: the package containing both files, else their common ancestor (never a filesystem root or home). */
+function mirrorRoot(sourceFile, testPath) {
+  const pkg = packageRoot(path.dirname(sourceFile));
+  if (pkg && (testPath === pkg || isInside(pkg, testPath))) return pkg;
+  const common = commonAncestor(path.dirname(sourceFile), path.dirname(testPath));
+  const tooBroad = common === path.parse(common).root || common === os.homedir() || common.split(path.sep).filter(Boolean).length < 2;
+  return tooBroad ? null : common;
+}
+
+function nearestNodeModules(root) {
+  for (let dir = root; ; dir = path.dirname(dir)) {
+    const candidate = path.join(dir, 'node_modules');
+    if (fs.existsSync(candidate)) return candidate;
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+/** Copy `root` (without node_modules/.git/build output) to a temp dir and link node_modules. Throws if the copy is too large. */
+function createMirror(root) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'quell-verify-'));
+  let files = 0;
+  let bytes = 0;
+  const cleanup = () => {
+    const link = path.join(dir, 'node_modules');
+    try {
+      fs.unlinkSync(link);
+    } catch {
+      try { fs.rmdirSync(link); } catch { /* no link */ }
+    }
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  };
+  try {
+    fs.cpSync(root, dir, {
+      recursive: true,
+      filter: (source) => {
+        if (MIRROR_SKIP.has(path.basename(source)) || source.endsWith(BACKUP_SUFFIX)) return false;
+        const stat = fs.lstatSync(source);
+        if (stat.isDirectory()) return true;
+        files += 1;
+        bytes += stat.size;
+        if (files > MIRROR_LIMITS.files || bytes > MIRROR_LIMITS.bytes) throw new Error('project too large to mirror');
+        return true;
+      },
+    });
+    const modules = nearestNodeModules(root);
+    if (modules) fs.symlinkSync(modules, path.join(dir, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+  return { dir, cleanup };
+}
+
+const excerpt = (run) => (run.error ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 4).join(' | ').slice(0, 400);
+
 function outcomeOf(run) {
   if (run.timedOut) return 'timeout';
   if (run.infrastructure) return 'error';
   return run.passed ? 'survived' : 'killed';
 }
 
+const lineAt = (text, offset) => {
+  const start = text.lastIndexOf('\n', offset - 1) + 1;
+  const end = text.indexOf('\n', offset);
+  return text.slice(start, end < 0 ? undefined : end).trim();
+};
+
 /**
  * Verify that a test really protects the code under test.
  *
  * 1. The test must pass on the original source.
  * 2. It must contain an assertion that observes the code (not a placeholder).
- * 3. Mutants of `sourceFile` (optionally only `functions`) are injected one at a time and the test
- *    must fail on at least one. Only genuine test failures count as kills: timeouts and runner
- *    errors are reported separately. The source is always restored in a `finally`, with an on-disk
- *    backup so a run killed outright is repaired on the next call (and by `scan`/`generate`).
- *    A Ctrl-C that reaches the test subprocess aborts the run and restores the source.
+ * 3. Mutants of `sourceFile` (optionally only `functions` / `lines`) are injected one at a time and the test
+ *    must fail on at least one (and reach `minScore` percent of decided mutants, if given). Only genuine test
+ *    failures count as kills: timeouts and runner errors are reported separately.
  *
- * `testSource` is written to `testPath` for the run and removed afterwards; pass `null` to verify a
- * test file that already exists at `testPath`.
+ * Isolation: by default everything runs in a temporary copy of the project (node_modules is linked), so the real
+ * source and test files are never touched. If the project cannot be mirrored (too large, no common root) or
+ * `inPlace: true` is set, the source is mutated in place and always restored in a `finally`, with an on-disk backup so
+ * a run killed outright is repaired on the next call (and by `scan`/`generate`). `result.isolation` says which was used.
+ *
+ * `testSource` is written to `testPath` for the run (in the copy when isolated) and removed afterwards; pass `null`
+ * to verify a test file that already exists at `testPath`. Relative paths are resolved against the current directory.
  */
 export function verifyGenerated(testSource, options = {}) {
-  const { sourceFile, runner = 'node', functions, maxMutants = 30, timeoutMs } = options;
-  const unverified = (reason, extra = {}) => ({ verified: false, reason, correctCode: { passed: false }, injectedBug: { passed: false }, mutants: [], killed: 0, total: 0, mutationScore: null, ...extra });
-  if (!sourceFile || !fs.existsSync(sourceFile)) return unverified('no source file to mutate: pass options.sourceFile');
+  const { runner = 'node', functions, lines, maxMutants = 30, timeoutMs, minScore = 0 } = options;
+  const unverified = (reason, extra = {}) => ({ verified: false, reason, correctCode: { passed: false }, injectedBug: { passed: false }, mutants: [], killed: 0, total: 0, ignored: 0, mutationScore: null, ...extra });
+  if (!options.sourceFile || !fs.existsSync(options.sourceFile)) return unverified('no source file to mutate: pass options.sourceFile');
+  const sourceFile = path.resolve(options.sourceFile);
   restoreIfInterrupted(sourceFile);
   const ext = path.extname(sourceFile);
-  const testPath = options.testPath ?? path.join(path.dirname(sourceFile), `${path.basename(sourceFile, ext)}.quelltest-verify.test${runner === 'node' ? '.mjs' : ext}`);
+  const testPath = path.resolve(options.testPath ?? path.join(path.dirname(sourceFile), `${path.basename(sourceFile, ext)}.quelltest-verify.test${runner === 'node' ? '.mjs' : ext}`));
   const ownsTest = testSource !== null && testSource !== undefined;
+  if (!ownsTest && !fs.existsSync(testPath)) return unverified(`test file not found: ${testPath}`);
   const original = fs.readFileSync(sourceFile, 'utf8');
   const source = ownsTest ? testSource : fs.readFileSync(testPath, 'utf8');
-  const runOptions = { runner, cwd: options.cwd ?? path.dirname(sourceFile), timeoutMs };
 
-  if (ownsTest) fs.writeFileSync(testPath, testSource, 'utf8');
+  let root = null;
+  let mirror = null;
+  if (!options.inPlace) {
+    root = mirrorRoot(sourceFile, testPath);
+    if (root) {
+      try {
+        mirror = createMirror(root);
+      } catch {
+        mirror = null;
+      }
+    }
+  }
+  const isolation = mirror ? 'copy' : 'in-place';
+  const map = (file) => (mirror && (file === root || isInside(root, file)) ? path.join(mirror.dir, path.relative(root, file)) : file);
+  const runSource = map(sourceFile);
+  const runTestPath = map(testPath);
+  const cwd = path.resolve(options.cwd ?? path.dirname(sourceFile));
+  const runOptions = { runner, cwd: map(cwd), timeoutMs };
+
+  if (ownsTest) {
+    fs.mkdirSync(path.dirname(runTestPath), { recursive: true });
+    fs.writeFileSync(runTestPath, testSource, 'utf8');
+  }
   try {
-    const correctCode = runTest(testPath, runOptions);
-    if (!correctCode.passed) return unverified(correctCode.infrastructure ? `test runner could not run: ${correctCode.error}` : 'test fails on the original code', { correctCode });
-    if (!hasMeaningfulAssertion(source)) return unverified('test has no assertion that observes the code under test', { correctCode });
-    const candidates = mutants(original, sourceFile, { functions, max: maxMutants });
-    if (!candidates.length) return unverified('no applicable mutation in the code under test', { correctCode });
+    const correctCode = runTest(runTestPath, runOptions);
+    if (!correctCode.passed) {
+      const why = correctCode.infrastructure ? `test runner could not run: ${correctCode.error}` : `test fails on the original code (${correctCode.command}): ${excerpt(correctCode)}`;
+      return unverified(why, { correctCode, isolation });
+    }
+    if (!hasMeaningfulAssertion(source)) return unverified('test has no assertion that observes the code under test', { correctCode, isolation });
+    const { list: candidates, ignored } = mutantsWithStats(original, sourceFile, { functions, lines, max: maxMutants });
+    if (!candidates.length) return unverified('no applicable mutation in the code under test', { correctCode, isolation, ignored });
     const results = [];
-    fs.writeFileSync(sourceFile + BACKUP_SUFFIX, original, 'utf8');
+    if (!mirror) fs.writeFileSync(sourceFile + BACKUP_SUFFIX, original, 'utf8');
     try {
       for (const mutant of candidates) {
-        fs.writeFileSync(sourceFile, applyMutant(original, mutant), 'utf8');
-        const run = runTest(testPath, runOptions);
+        const mutated = applyMutant(original, mutant);
+        fs.writeFileSync(runSource, mutated, 'utf8');
+        const run = runTest(runTestPath, runOptions);
         if (run.interrupted) throw new Error(`verification interrupted: ${run.error}`);
-        results.push({ description: mutant.description, line: mutant.line, function: mutant.function, outcome: outcomeOf(run), killed: outcomeOf(run) === 'killed' });
+        const outcome = outcomeOf(run);
+        results.push({
+          description: mutant.description, kind: mutant.kind, line: mutant.line, function: mutant.function, outcome, killed: outcome === 'killed',
+          before: lineAt(original, mutant.start), after: lineAt(mutated, mutant.start),
+        });
       }
     } finally {
-      fs.writeFileSync(sourceFile, original, 'utf8');
-      fs.rmSync(sourceFile + BACKUP_SUFFIX, { force: true });
+      if (!mirror) {
+        fs.writeFileSync(sourceFile, original, 'utf8');
+        fs.rmSync(sourceFile + BACKUP_SUFFIX, { force: true });
+      }
     }
     const killed = results.filter((item) => item.killed).length;
     const decided = results.filter((item) => item.outcome === 'killed' || item.outcome === 'survived').length;
     const inconclusive = results.length - decided;
+    const mutationScore = decided ? Math.round((killed / decided) * 100) : null;
     let reason = null;
     if (killed === 0) reason = inconclusive ? `no mutant was killed (${inconclusive} timed out or could not run)` : 'test passes on every mutant of the code under test';
+    else if (mutationScore < minScore) reason = `mutation score ${mutationScore}% is below the required ${minScore}%`;
     return {
-      verified: killed > 0, reason,
-      correctCode, injectedBug: { passed: killed > 0 }, mutants: results, killed, total: results.length, inconclusive,
-      mutationScore: decided ? Math.round((killed / decided) * 100) : null,
+      verified: reason === null, reason,
+      correctCode, injectedBug: { passed: killed > 0 }, mutants: results, killed, total: results.length, inconclusive, ignored, mutationScore,
+      isolation, sourceFile, testPath,
     };
   } finally {
-    if (ownsTest) fs.rmSync(testPath, { force: true });
+    if (mirror) mirror.cleanup();
+    else if (ownsTest) fs.rmSync(runTestPath, { force: true });
   }
 }

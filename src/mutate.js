@@ -1,11 +1,16 @@
-import { FUNCTION_TYPES, childNodes, functionName, parseSource } from './ast.js';
+import { FUNCTION_TYPES, childNodes, functionName, parseSource, propertyName } from './ast.js';
 
 const OPERATOR_SWAPS = {
   '<': '<=', '<=': '<', '>': '>=', '>=': '>',
   '===': '!==', '!==': '===', '==': '!=', '!=': '==',
   '+': '-', '-': '+', '*': '/',
-  '&&': '||', '||': '&&',
+  '&&': '||', '||': '&&', '??': '||',
 };
+// Protections the rule pack looks for: wrapping calls that sanitise or coerce untrusted input.
+const SANITIZER_CALL = /^(?:escape\w*|sanitiz\w*|String|Number|parseInt|parseFloat|encodeURIComponent|encodeURI|basename|(?:path\.)?basename|normalize)$/i;
+// Lower number = tried first when the cap cuts the list: mutants aimed at risky code come before generic operator flips.
+const PRIORITY = { sanitizer: 0, await: 0, nullish: 1, guard: 2, throw: 2, operator: 3 };
+const IGNORE_MUTANT = /quell-ignore-mutant/;
 
 /** Index of `operator` between two operands, skipping comments that may sit in the gap; -1 if absent. */
 export function findOperator(text, from, to, operator) {
@@ -23,38 +28,70 @@ export function findOperator(text, from, to, operator) {
   return -1;
 }
 
+const inRanges = (line, ranges) => ranges.some((range) => (Array.isArray(range) ? line >= range[0] && line <= range[1] : line === range));
+
 /**
- * Enumerate deterministic source mutants: flipped comparison/arithmetic/logical operators,
- * removed guards (`if (c)` -> `if (false)`) and removed throws. Each mutant is a text splice.
- * `options.functions` limits mutation to the named functions; `options.max` caps the count.
+ * Enumerate deterministic source mutants. Each mutant is a text splice with a `kind`:
+ * `sanitizer` (unwrap `escapeRegExp(x)`/`String(x)`/`path.basename(x)`), `await` (drop `await`), `nullish`
+ * (`??` -> `||`, numeric `||` -> `??`), `guard` (`if (c)` -> `if (false)`), `throw` (removed) and `operator` flips.
+ *
+ * Options: `functions` limits mutation to named functions; `lines` (numbers or `[from, to]` ranges) limits it to
+ * those source lines (e.g. scan findings); `max` caps the count after risk-aimed kinds are ordered first.
+ * A line marked `// quell-ignore-mutant [reason]` (or the line after such a comment) is never mutated.
+ * Returns `{ list, ignored }`.
  */
-export function mutants(text, file, options = {}) {
+export function mutantsWithStats(text, file, options = {}) {
   const ast = parseSource(text, file);
-  if (!ast) return [];
+  if (!ast) return { list: [], ignored: 0 };
   const wanted = options.functions?.length ? new Set(options.functions) : null;
+  const lines = text.split('\n');
   const out = [];
+  let ignored = 0;
   const frames = [{ name: '<module>' }];
-  const add = (node, start, end, replacement, description) => {
+  const add = (node, kind, start, end, replacement, description) => {
     if (wanted && !wanted.has(frames.at(-1).name)) return;
-    out.push({ id: `${start}:${end}:${replacement}`, line: node.loc.start.line, start, end, replacement, description: `${description} (line ${node.loc.start.line})`, function: frames.at(-1).name });
+    const line = node.loc.start.line;
+    if (options.lines && !inRanges(line, options.lines)) return;
+    if (IGNORE_MUTANT.test(lines[line - 1] ?? '') || IGNORE_MUTANT.test(lines[line - 2] ?? '')) {
+      ignored += 1;
+      return;
+    }
+    out.push({ id: `${start}:${end}:${replacement}`, kind, line, start, end, replacement, description: `${description} (line ${line})`, function: frames.at(-1).name });
   };
   const visit = (node, parent) => {
     const isFunction = FUNCTION_TYPES.has(node.type);
     if (isFunction) frames.push({ name: functionName(node, parent, frames.at(-1).name) });
+
     if ((node.type === 'BinaryExpression' || node.type === 'LogicalExpression') && OPERATOR_SWAPS[node.operator]) {
       const start = findOperator(text, node.left.end, node.right.start, node.operator);
       if (start >= 0) {
-        add(node, start, start + node.operator.length, OPERATOR_SWAPS[node.operator], `${node.operator} -> ${OPERATOR_SWAPS[node.operator]}`);
+        const swap = OPERATOR_SWAPS[node.operator];
+        add(node, node.operator === '??' ? 'nullish' : 'operator', start, start + node.operator.length, swap, `${node.operator} -> ${swap}`);
+        if (node.operator === '||' && node.right.type === 'NumericLiteral') add(node, 'nullish', start, start + 2, '??', '|| -> ?? (0 no longer falls back)');
       }
     }
-    if (node.type === 'IfStatement') add(node, node.test.start, node.test.end, 'false', 'guard removed');
-    if (node.type === 'ThrowStatement') add(node, node.start, node.end, ';', 'throw removed');
+    if (node.type === 'IfStatement') add(node, 'guard', node.test.start, node.test.end, 'false', 'guard removed');
+    if (node.type === 'ThrowStatement') add(node, 'throw', node.start, node.end, ';', 'throw removed');
+    if (node.type === 'AwaitExpression' && frames.length > 1) {
+      const end = node.argument.extra?.parenthesized ? node.argument.extra.parenStart : node.argument.start;
+      add(node, 'await', node.start, end, '', 'await removed');
+    }
+    if (node.type === 'CallExpression' && node.arguments.length === 1 && node.arguments[0].type !== 'SpreadElement') {
+      const callee = node.callee.type === 'Identifier' ? node.callee.name : (node.callee.type === 'MemberExpression' ? `${node.callee.object.name ?? ''}.${propertyName(node.callee)}` : '');
+      if (SANITIZER_CALL.test(callee)) add(node, 'sanitizer', node.start, node.end, text.slice(node.arguments[0].start, node.arguments[0].end), `sanitiser ${callee}() unwrapped`);
+    }
     for (const child of childNodes(node)) visit(child, node);
     if (isFunction) frames.pop();
   };
   visit(ast.program, null);
-  const unique = [...new Map(out.map((m) => [m.id, m])).values()].sort((a, b) => a.start - b.start);
-  return unique.slice(0, options.max ?? 30);
+  const unique = [...new Map(out.map((m) => [m.id, m])).values()];
+  unique.sort((a, b) => PRIORITY[a.kind] - PRIORITY[b.kind] || a.start - b.start);
+  return { list: unique.slice(0, options.max ?? 30), ignored };
+}
+
+/** Mutants only (see `mutantsWithStats`). */
+export function mutants(text, file, options = {}) {
+  return mutantsWithStats(text, file, options).list;
 }
 
 /** Apply one mutant to `text`. */

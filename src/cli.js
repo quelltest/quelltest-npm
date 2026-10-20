@@ -2,7 +2,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { report, generate, generateWithLlm, toSarif, verifyGenerated } from './index.js';
+import { report, generate, generateWithLlm, scan, toSarif, verifyGenerated } from './index.js';
+import { renderHandoff } from './handoff.js';
 import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -33,6 +34,10 @@ Options:
   --llm MODULE           generate: ESM module whose default export writes tests for findings the rules cannot
   --source FILE          verify: source file to mutate (required)
   --function NAME        verify: only mutate this function (repeatable)
+  --findings             verify: aim mutation at lines the scanner flagged
+  --min-score N          verify: also require N% of mutants killed
+  --handoff FILE         verify: write surviving mutants as Markdown an agent can act on
+  --in-place             verify: mutate the source file itself instead of a temporary copy
   --runner NAME          generate/verify: node, jest, vitest or mocha (generate default: detected from package.json)
   -h, --help | -v, --version`;
 
@@ -56,11 +61,19 @@ function printScore(result) {
 
 function runVerify(testFile, options) {
   if (!options.source) throw new UsageError('verify requires --source FILE');
-  const result = verifyGenerated(null, { sourceFile: options.source, testPath: testFile, runner: options.runner, functions: options.function });
+  // --findings aims mutation at the lines the scanner flagged instead of the whole file.
+  const lines = options.findings ? scan(options.source, { includeTests: true }).findings.map((item) => [item.line, item.endLine]) : undefined;
+  const result = verifyGenerated(null, {
+    sourceFile: options.source, testPath: testFile, runner: options.runner, functions: options.function, lines,
+    inPlace: options['in-place'], minScore: options['min-score'],
+  });
+  if (options.handoff) fs.writeFileSync(options.handoff, renderHandoff(result, { sourceText: fs.existsSync(options.source) ? fs.readFileSync(options.source, 'utf8') : '' }), 'utf8');
   if (options.json) console.log(JSON.stringify(result, null, 2));
   else {
-    console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)` : `Not verified: ${result.reason}`);
-    for (const mutant of result.mutants.filter((item) => !item.killed)) console.log(`  survived: ${mutant.description}`);
+    const suffix = `${result.isolation ? ` [${result.isolation}]` : ''}${result.ignored ? `, ${result.ignored} ignored` : ''}${result.inconclusive ? `, ${result.inconclusive} inconclusive` : ''}`;
+    console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)${suffix}` : `Not verified: ${result.reason}${suffix}`);
+    for (const mutant of result.mutants.filter((item) => item.outcome === 'survived')) console.log(`  survived: ${mutant.description}`);
+    if (options.handoff) console.log(`Handoff written to ${options.handoff}`);
   }
   return result.verified ? EXIT.ok : EXIT.notVerified;
 }

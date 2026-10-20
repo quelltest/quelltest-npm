@@ -2,8 +2,8 @@ import fs from 'node:fs';
 
 export const COMMANDS = ['find', 'score', 'generate', 'verify'];
 
-const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify', 'include-covered']);
-const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm']);
+const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify', 'include-covered', 'in-place', 'findings']);
+const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm', 'min-score', 'handoff']);
 const REPEATABLE = new Set(['include', 'exclude', 'function']);
 const ALIASES = { ignore: 'exclude', h: 'help', v: 'version' };
 
@@ -37,6 +37,10 @@ export function parseArgs(argv) {
   }
   if (options.threshold !== undefined) options.threshold = integer('threshold', options.threshold);
   if (options.top !== undefined) options.top = integer('top', options.top, { min: 1 });
+  if (options['min-score'] !== undefined) {
+    options['min-score'] = integer('min-score', options['min-score']);
+    if (options['min-score'] > 100) throw new UsageError('--min-score expects 0-100');
+  }
   const first = positionals[0];
   const command = COMMANDS.includes(first) ? first : 'find';
   const rest = command === first ? positionals.slice(1) : positionals;
