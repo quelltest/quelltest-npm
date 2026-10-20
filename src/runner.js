@@ -3,23 +3,27 @@ import path from 'node:path';
 
 export const RUNNERS = ['node', 'jest', 'vitest', 'mocha'];
 
-/** Pick the test runner from the nearest package.json (vitest, then jest/react-scripts, then mocha, else node:test). */
+/**
+ * The runner a package.json names: vitest, then jest/react-scripts, then mocha (dependencies, devDependencies, the `jest` key
+ * or the `test` script), or `node` for a `node --test` script. `null` when it names none (or cannot be read).
+ */
+export function packageRunner(dir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    const script = String(pkg.scripts?.test ?? '');
+    if (deps.vitest || /vitest/.test(script)) return 'vitest';
+    if (deps.jest || deps['react-scripts'] || pkg.jest || /(?:jest|react-scripts)/.test(script)) return 'jest';
+    if (deps.mocha || /mocha/.test(script)) return 'mocha';
+    if (/node.*--test/.test(script)) return 'node';
+  } catch { /* unreadable package.json: no signal */ }
+  return null;
+}
+
+/** Pick the test runner from the nearest package.json (see packageRunner), else node:test. */
 export function detectRunner(cwd = process.cwd()) {
   for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
-    const file = path.join(dir, 'package.json');
-    if (fs.existsSync(file)) {
-      try {
-        const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        const script = String(pkg.scripts?.test ?? '');
-        if (deps.vitest || /\bvitest\b/.test(script)) return 'vitest';
-        if (deps.jest || deps['react-scripts'] || pkg.jest || /\b(?:jest|react-scripts)\b/.test(script)) return 'jest';
-        if (deps.mocha || /\bmocha\b/.test(script)) return 'mocha';
-        return 'node';
-      } catch {
-        return 'node';
-      }
-    }
+    if (fs.existsSync(path.join(dir, 'package.json'))) return packageRunner(dir) ?? 'node';
     if (path.dirname(dir) === dir) return 'node';
   }
 }

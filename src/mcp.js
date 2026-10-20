@@ -30,7 +30,7 @@ const TOOLS = [
         test: { type: 'string', description: 'Path of the test file' },
         source: { type: 'string', description: 'Path of the source file the test protects' },
         functions: { type: 'array', items: { type: 'string' }, description: 'Only mutate these functions' },
-        runner: { type: 'string', enum: ['node', 'jest', 'vitest', 'mocha'] },
+        runner: { type: 'string', enum: ['node', 'jest', 'vitest', 'mocha'], description: 'Test runner (default: detected from the nearest package.json, else node:test)' },
         min_score: { type: 'integer', minimum: 0, maximum: 100 },
       },
     },
@@ -64,7 +64,7 @@ const HANDLERS = {
   verify(args) {
     const result = verifyGenerated(null, { sourceFile: args.source, testPath: args.test, functions: args.functions, runner: args.runner, minScore: args.min_score });
     const handoff = renderHandoff(result, { sourceText: fs.existsSync(args.source) ? fs.readFileSync(args.source, 'utf8') : '' });
-    return text(`${JSON.stringify({ verified: result.verified, reason: result.reason, killed: result.killed, total: result.total, mutationScore: result.mutationScore, isolation: result.isolation }, null, 2)}\n\n${handoff}`);
+    return text(`${JSON.stringify({ verified: result.verified, reason: result.reason, killed: result.killed, total: result.total, mutationScore: result.mutationScore, isolation: result.isolation, runner: result.runner, runnerSource: result.runnerSource }, null, 2)}\n\n${handoff}`);
   },
   gate(args) {
     return text(gate(args.diff, { strict: Boolean(args.strict) }));
