@@ -1,0 +1,23 @@
+{
+  "description": "Known defects from a real Express/React code base (reported against quelltest 0.1.0). `expect` is the rule or category quelltest should flag on `line`; null marks a known miss that static line-level rules cannot see.",
+  "defects": [
+    { "id": "B1", "title": "Expired/invalid JWT returned HTTP 500 (jwt.verify)", "file": "defects/B1.js", "line": 3, "expect": "unguarded-call" },
+    { "id": "B2", "title": "User search crashed on '(' ($regex from user input)", "file": "defects/B2.js", "line": 3, "expect": "regex-injection" },
+    { "id": "B3", "title": "Mobile-number login never matched (+91 not normalised)", "file": null, "line": null, "expect": null },
+    { "id": "B4", "title": "Non-string password crashed bcrypt", "file": "defects/B4.js", "line": 3, "expect": "unguarded-call" },
+    { "id": "B5", "title": "Attendance correction accepted any field (Object.assign with req.body)", "file": "defects/B5.js", "line": 2, "expect": "mass-assignment" },
+    { "id": "B6", "title": "Status endpoint accepted any value", "file": "defects/B6.js", "line": 2, "expect": "mass-assignment" },
+    { "id": "B7", "title": "Simultaneous check-ins gave a misleading duplicate error (exists then create)", "file": "defects/B7.js", "line": 3, "expect": "check-then-act" },
+    { "id": "B8", "title": "Reassign allowed deleted/inactive parent", "file": null, "line": null, "expect": null },
+    { "id": "B9", "title": "Negative page size accepted (Number(x) || default)", "file": "defects/B9.js", "line": 2, "expect": "falsy-fallback" },
+    { "id": "B10", "title": "Duplicate error always listed four fields", "file": null, "line": null, "expect": null },
+    { "id": "B11", "title": "User creation did not validate email/mobile (create(req.body))", "file": "defects/B11.js", "line": 2, "expect": "mass-assignment" },
+    { "id": "B12", "title": "Lost refresh response logged the user out", "file": null, "line": null, "expect": null },
+    { "id": "F1", "title": "Network blip during refresh logged the user out (call before === in if)", "file": "defects/F1.js", "line": 2, "expect": "boundary" },
+    { "id": "F2", "title": "Hour 0 got an invalid React key (|| instead of ??)", "file": "defects/F2.js", "line": 2, "expect": "falsy-fallback" },
+    { "id": "F3", "title": "'View all' reloaded the whole app", "file": null, "line": null, "expect": null },
+    { "id": "F4", "title": "Audit page crashed when items missing (data.items.map)", "file": "defects/F4.js", "line": 2, "expect": "unguarded-member-call" },
+    { "id": "F5", "title": "Audit page crashed on an event with no action", "file": null, "line": null, "expect": null },
+    { "id": "F6", "title": "Rules saved with no validation", "file": null, "line": null, "expect": null }
+  ]
+}
