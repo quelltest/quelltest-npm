@@ -4,7 +4,7 @@ import { childNodes, parseSource } from './ast.js';
 import { allGuards, describeModule, exportOf, guardFor } from './unit.js';
 import { exampleCases, guardCases } from './synthesize.js';
 import { renderRequests, requestCases, routeFor } from './routes.js';
-import { detectRunner, renderTest, testExtension, RUNNERS } from './runner.js';
+import { findRunner, renderTest, testExtension, RUNNERS } from './runner.js';
 import { verifyGenerated } from './verification.js';
 
 const ALLOWED_MODULES = new Set(['node:test', 'node:assert', 'node:assert/strict', 'assert', 'assert/strict', 'vitest', '@jest/globals']);
@@ -138,7 +138,7 @@ function finalize(finding, source, ctx, options, seen) {
     const run = () => {
       fs.writeFileSync(probe, current, 'utf8');
       try {
-        return verifyGenerated(null, { sourceFile, testPath: probe, runner, functions: [entry.name], cwd: options.cwd });
+        return verifyGenerated(null, { sourceFile, testPath: probe, runner, runnerSource: options.runnerSource, functions: [entry.name], cwd: options.cwd });
       } finally {
         removeFile(probe);
       }
@@ -178,11 +178,13 @@ function finalize(finding, source, ctx, options, seen) {
 
 function resolveOptions(options) {
   const cwd = path.resolve(options.cwd ?? process.cwd());
-  const runner = options.runner ?? detectRunner(cwd);
+  const found = options.runner ? null : findRunner(cwd);
+  const runner = options.runner ?? found.runner ?? 'node';
+  const runnerSource = options.runner ? 'flag' : (found.runner ? 'detected' : 'default');
   if (!RUNNERS.includes(runner)) throw new Error(`unsupported runner: ${runner} (expected ${RUNNERS.join(', ')})`);
   const destination = path.resolve(cwd, options.destination ?? 'tests/quelltest');
   if (fs.existsSync(destination) && !fs.statSync(destination).isDirectory()) throw new Error(`destination is not a directory: ${destination}`);
-  return { ...options, cwd, runner, destination };
+  return { ...options, cwd, runner, runnerSource, destination };
 }
 
 function candidateFor(finding, planned, options) {

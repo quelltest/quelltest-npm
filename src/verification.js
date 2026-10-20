@@ -6,6 +6,7 @@ import { childNodes, parseSource } from './ast.js';
 import { BACKUP_SUFFIX, restoreIfInterrupted } from './backup.js';
 import { applyMutant, mutantsWithStats } from './mutate.js';
 import { mockBoundaryOf, mockedBindings } from './mocks.js';
+import { findRunner } from './runner.js';
 
 const RUNNER_PACKAGES = {
   jest: { name: 'jest', args: (file) => ['--runTestsByPath', file] },
@@ -101,6 +102,10 @@ export function hasMeaningfulAssertion(testSource) {
 
 // --- isolation: verify in a throwaway copy so the real source is never modified --------------------------------
 
+// Windows paths compare without regard to case (and `c:\x` is `C:\x`); normalise the drive letter and compare through path.relative.
+const normalizeDrive = (file) => (process.platform === 'win32' ? file.replace(/^[a-z]:/, (drive) => drive.toUpperCase()) : file);
+const same = (a, b) => path.relative(a, b) === '';
+
 const isInside = (parent, child) => {
   const relative = path.relative(parent, child);
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
@@ -117,16 +122,29 @@ function commonAncestor(a, b) {
   const left = a.split(path.sep);
   const right = b.split(path.sep);
   const shared = [];
-  for (let i = 0; i < Math.min(left.length, right.length) && left[i] === right[i]; i += 1) shared.push(left[i]);
+  const fold = (part) => (process.platform === 'win32' ? part.toLowerCase() : part);
+  for (let i = 0; i < Math.min(left.length, right.length) && fold(left[i]) === fold(right[i]); i += 1) shared.push(left[i]);
   return shared.join(path.sep) || path.sep;
 }
 
-const tooBroad = (dir) => dir === path.parse(dir).root || dir === os.homedir() || dir.split(path.sep).filter(Boolean).length < 2;
+const tooBroad = (dir) => [path.parse(dir).root, os.homedir()].some((broad) => broad && same(broad, dir)) || dir.split(path.sep).filter(Boolean).length < 2;
+
+/**
+ * Root of the package that owns the test: the nearest directory with a package.json at or above it, never above `root` (the
+ * mirror root) and never at or above a filesystem root or home directory. Null when there is none.
+ */
+function ownerRoot(testPath, root) {
+  for (let dir = path.dirname(testPath); ; dir = path.dirname(dir)) {
+    if (!(root && same(dir, root)) && tooBroad(dir)) return null;
+    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    if ((root && same(dir, root)) || path.dirname(dir) === dir) return null;
+  }
+}
 
 /** Directory to mirror: the package containing both files, else their common ancestor (never a filesystem root or home). */
 function mirrorRoot(sourceFile, testPath) {
   const pkg = packageRoot(path.dirname(sourceFile));
-  if (pkg && !tooBroad(pkg) && (testPath === pkg || isInside(pkg, testPath))) return pkg;
+  if (pkg && !tooBroad(pkg) && (same(pkg, testPath) || isInside(pkg, testPath))) return pkg;
   const common = commonAncestor(path.dirname(sourceFile), path.dirname(testPath));
   return tooBroad(common) ? null : common;
 }
@@ -221,13 +239,26 @@ const lineAt = (text, offset) => {
  * to verify a test file that already exists at `testPath`. Relative paths are resolved against the current directory.
  */
 export function verifyGenerated(testSource, options = {}) {
-  const { runner = 'node', functions, lines, maxMutants = 30, maxPerKind, timeoutMs, minScore = 0, command, infraExitCodes } = options;
-  const unverified = (reason, extra = {}) => ({ verified: false, reason, correctCode: { passed: false }, injectedBug: { passed: false }, mutants: [], killed: 0, total: 0, ignored: 0, mutationScore: null, ...extra });
+  const { functions, lines, maxMutants = 30, maxPerKind, timeoutMs, minScore = 0, command, infraExitCodes } = options;
+  let chosen = { runner: null, runnerSource: null };
+  const unverified = (reason, extra = {}) => ({ verified: false, reason, correctCode: { passed: false }, injectedBug: { passed: false }, mutants: [], killed: 0, total: 0, ignored: 0, mutationScore: null, ...chosen, ...extra });
   if (!options.sourceFile || !fs.existsSync(options.sourceFile)) return unverified('no source file to mutate: pass options.sourceFile');
-  const sourceFile = path.resolve(options.sourceFile);
+  const sourceFile = normalizeDrive(path.resolve(options.sourceFile));
   restoreIfInterrupted(sourceFile);
   const ext = path.extname(sourceFile);
-  const testPath = path.resolve(options.testPath ?? path.join(path.dirname(sourceFile), `${path.basename(sourceFile, ext)}.quelltest-verify.test${runner === 'node' ? '.mjs' : ext}`));
+  // The runner: --runner, else the nearest package.json at or above the test (within the project), else node:test. A custom
+  // command involves no runner. Without a test path the test will sit next to the source, so detect from there.
+  const probePath = options.testPath ? normalizeDrive(path.resolve(options.testPath)) : path.join(path.dirname(sourceFile), 'quelltest-verify.test');
+  const projectRoot = mirrorRoot(sourceFile, probePath);
+  const owner = ownerRoot(probePath, projectRoot);
+  // The first package.json from the test upwards that names a runner (within the project) also gives the runner's cwd.
+  const found = command ? null : findRunner(path.dirname(probePath), { stopAt: projectRoot ?? undefined });
+  if (options.runner && !command) chosen = { runner: options.runner, runnerSource: ['detected', 'default'].includes(options.runnerSource) ? options.runnerSource : 'flag' };
+  else if (!command) {
+    chosen = found.runner ? { runner: found.runner, runnerSource: 'detected' } : { runner: 'node', runnerSource: 'default', runnerNote: found.error ?? 'no runner found in package.json at or below the project root (pass --runner to choose one)' };
+  }
+  const { runner } = chosen;
+  const testPath = options.testPath ? probePath : path.resolve(path.join(path.dirname(sourceFile), `${path.basename(sourceFile, ext)}.quelltest-verify.test${runner === 'node' ? '.mjs' : ext}`));
   const ownsTest = testSource !== null && testSource !== undefined;
   if (!ownsTest && !fs.existsSync(testPath)) return unverified(`test file not found: ${testPath}`);
   const original = fs.readFileSync(sourceFile, 'utf8');
@@ -237,7 +268,7 @@ export function verifyGenerated(testSource, options = {}) {
   let root = null;
   let mirror = null;
   if (!options.inPlace) {
-    root = mirrorRoot(sourceFile, testPath);
+    root = projectRoot;
     if (root) {
       try {
         mirror = createMirror(root, [sourceFile, testPath]);
@@ -248,10 +279,13 @@ export function verifyGenerated(testSource, options = {}) {
     }
   }
   const isolation = mirror ? 'copy' : 'in-place';
-  const map = (file) => (mirror && (file === root || isInside(root, file)) ? path.join(mirror.dir, path.relative(root, file)) : file);
+  const map = (file) => (mirror && (same(root, file) || isInside(root, file)) ? path.join(mirror.dir, path.relative(root, file)) : file);
   const runSource = map(sourceFile);
   const runTestPath = map(testPath);
-  const cwd = path.resolve(options.cwd ?? path.dirname(sourceFile));
+  // A runner runs in the folder of the package.json that names it (else the nearest package.json at or above the test, else the
+  // project root): Vitest takes its root, and Jest and Mocha their config, from the working directory. A custom command keeps
+  // the source file's folder, as documented.
+  const cwd = path.resolve(options.cwd ?? (command ? path.dirname(sourceFile) : (found?.dir ?? owner ?? projectRoot ?? path.dirname(sourceFile))));
   const runOptions = { runner, cwd: map(cwd), timeoutMs, command, infraExitCodes };
 
   // In place, writing `testSource` to an existing file would destroy it (the finally block deletes it afterwards).
@@ -312,7 +346,7 @@ export function verifyGenerated(testSource, options = {}) {
     return {
       verified: reason === null, reason,
       correctCode, injectedBug: { passed: killed > 0 }, mutants: results, killed, total: results.length, inconclusive, ignored, mutationScore,
-      isolation, sourceFile, testPath, warnings, mocked: [...mocked],
+      ...chosen, isolation, sourceFile, testPath, warnings, mocked: [...mocked],
       survivorsOnMockedCode: results.filter((item) => item.outcome === 'survived' && item.mockBoundary).length,
       byKind: Object.fromEntries([...new Set(results.map((item) => item.kind))].map((kind) => [kind, { total: results.filter((item) => item.kind === kind).length, killed: results.filter((item) => item.kind === kind && item.killed).length }])),
     };

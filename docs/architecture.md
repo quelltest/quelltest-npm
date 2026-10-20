@@ -24,7 +24,7 @@ all of the above ──mcp──▶ tools for coding agents (find, verify, gate)
 | `diff.js` | Changed lines and changed files since the merge-base with a git ref. |
 | `unit.js` | Static description of a module: top-level functions, ESM/CommonJS exports, guards. |
 | `synthesize.js` | Turns guards into test cases: parameters, properties of parameters, and results of calls to injected dependencies (path conditions + a small solver). |
-| `runner.js`, `generator.js` | Detects the runner and module style, renders tests, gates them (security gate, originality), optional verification and writing. `routes.js` derives request cases for route handlers. |
+| `runner.js`, `generator.js` | Detects the runner (also used by `verify`, from the nearest package.json that names a runner) and module style, renders tests, gates them (security gate, originality), optional verification and writing. `routes.js` derives request cases for route handlers. |
 | `mutate.js`, `verification.js` | Source mutants and the verifier: baseline must pass, an assertion must observe the code, at least one mutant must fail; runs in a temporary copy of the project. `mocks.js` labels survivors on mocked code, `handoff.js` renders them for agents, `backup.js` repairs an interrupted in-place run. |
 | `gate.js` | Compares the test files of a change with their merge-base version. |
 | `mcp.js` | MCP server over stdio (JSON-RPC lines): `find`, `verify`, `gate`. |

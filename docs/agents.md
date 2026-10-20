@@ -44,6 +44,8 @@ To also require that the changed tests really catch faults, run verify on the te
 npx quell verify tests/pay.test.js --source src/pay.js --min-score 60 --handoff quell-handoff.md || exit 2
 ```
 
+`verify` detects the test runner (Vitest, Jest, Mocha or `node:test`) from the nearest `package.json` at or above the test file that names a runner (in `devDependencies` or `scripts.test`) and prints which one it used (`runner: jest (detected from package.json)`); pass `--runner NAME` to override it. The runner runs in the folder of the `package.json` that names it, else of the nearest `package.json`, so the test may live anywhere in the project, for example `tests/` next to `src/`. A runner declared only above the project root (a hoisted monorepo root, say) is not used by `verify`: pass `--runner`.
+
 > The hook and MCP recipes follow the documented Claude Code hook and MCP conventions but have only been exercised here through the unit tests (`test/mcp.test.js`, `test/gate.test.js`) and a scripted stdio client, not inside a live Claude Code session. Treat them as a starting point.
 
 ## In pull requests

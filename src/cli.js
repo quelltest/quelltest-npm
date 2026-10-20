@@ -45,13 +45,15 @@ Options:
   --findings             verify: aim mutation at lines the scanner flagged
   --min-score N          verify: also require N% of mutants killed
   --handoff FILE         verify: write surviving mutants as Markdown an agent can act on
-  --command CMD          verify: run your own command instead of a runner, e.g. "npm run test:integration -- {test}"
+  --command CMD          verify: run your own command instead of a runner, e.g. "npm run test:integration -- {test}" (runs in the source file's folder)
   --infra-exit CODE      verify: exit code your command uses for "the environment failed" (repeatable; not counted as a kill)
   --timeout SECONDS      verify: per-run timeout (default 60)
   --in-place             verify: mutate the source file itself instead of a temporary copy
   --examples FILE        mocks: HAR file, JSON examples file or OpenAPI JSON with recorded responses
   --strict               gate: also fail on 'expected value changed' review items
-  --runner NAME          generate/verify: node, jest, vitest or mocha (generate default: detected from package.json)
+  --runner NAME          generate/verify: node, jest, vitest or mocha (default: detected from the nearest package.json that names a runner, else node:test;
+                         verify looks from the test file up to the project root, never above it, and runs the runner in the folder of the
+                         package.json that names it, else of the nearest package.json)
   -h, --help | -v, --version`;
 
 function printFind(result, options) {
@@ -72,6 +74,8 @@ function printScore(result) {
   else console.log(`Score: ${summary.score}/100 ${summary.tier} | ${summary.covered}/${summary.total} candidates executed by tests | coverage evidence: ${summary.coverageEvidence}`);
 }
 
+const RUNNER_SOURCE = { flag: '--runner', detected: 'detected from package.json' };
+
 function runVerify(testFile, options) {
   if (!options.source) throw new UsageError('verify requires --source FILE');
   // --findings aims mutation at the lines the scanner flagged instead of the whole file.
@@ -85,6 +89,7 @@ function runVerify(testFile, options) {
   else {
     const suffix = `${result.isolation ? ` [${result.isolation}]` : ''}${result.ignored ? `, ${result.ignored} ignored` : ''}${result.inconclusive ? `, ${result.inconclusive} inconclusive` : ''}`;
     console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)${suffix}` : `Not verified: ${result.reason}${suffix}`);
+    if (result.runner) console.log(`runner: ${result.runner} (${RUNNER_SOURCE[result.runnerSource] ?? `default: ${result.runnerNote ?? 'no runner found in package.json'}`})`);
     for (const mutant of result.mutants.filter((item) => item.outcome === 'survived')) console.log(`  survived: ${mutant.description}`);
     if (options.handoff) console.log(`Handoff written to ${options.handoff}`);
   }
