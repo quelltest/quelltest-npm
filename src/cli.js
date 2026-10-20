@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import { report, generate, toSarif } from './index.js';
+import { report, generate, toSarif, verifyGenerated } from './index.js';
 import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -9,6 +9,7 @@ const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.met
 const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3 };
 
 const HELP = `Usage: quell <${COMMANDS.join('|')}> [PATH] [options]
+       quell verify TEST_FILE --source FILE [--function NAME] [--runner NAME]
 
 PATH may be a directory or a single file (default: .).
 
@@ -24,6 +25,9 @@ Options:
   --exclude GLOB         skip matching files (repeatable; alias --ignore; also .quellignore)
   --include-tests        scan test files too
   --write                generate: write scaffolds to disk
+  --source FILE          verify: source file to mutate (required)
+  --function NAME        verify: only mutate this function (repeatable)
+  --runner NAME          verify: node (default), jest, vitest or mocha
   -h, --help | -v, --version`;
 
 function printFind(result, options) {
@@ -44,10 +48,25 @@ function printScore(result) {
   else console.log(`Score: ${summary.score}/100 ${summary.tier} | ${summary.covered}/${summary.total} candidates executed by tests | coverage evidence: ${summary.coverageEvidence}`);
 }
 
+function runVerify(testFile, options) {
+  if (!options.source) throw new UsageError('verify requires --source FILE');
+  const result = verifyGenerated(null, { sourceFile: options.source, testPath: testFile, runner: options.runner, functions: options.function });
+  if (options.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    console.log(result.verified ? `Verified: test killed ${result.killed}/${result.total} mutants (${result.mutationScore}%)` : `Not verified: ${result.reason}`);
+    for (const mutant of result.mutants.filter((item) => !item.killed)) console.log(`  survived: ${mutant.description}`);
+  }
+  return result.verified ? EXIT.ok : EXIT.belowThreshold;
+}
+
 function run(argv) {
-  const { command, root, options } = parseArgs(argv);
+  const { command, root, hasPath, options } = parseArgs(argv);
   if (options.help) { console.log(HELP); return EXIT.ok; }
   if (options.version) { console.log(VERSION); return EXIT.ok; }
+  if (command === 'verify') {
+    if (!hasPath) throw new UsageError('verify requires a TEST_FILE');
+    return runVerify(root, options);
+  }
   const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff };
   const result = report(root, scanOptions);
   if (command === 'generate') {

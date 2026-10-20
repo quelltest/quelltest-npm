@@ -1,18 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { parse } from '@babel/parser';
 import { discoverFiles } from './files.js';
+import { FUNCTION_TYPES, ROUTE_METHODS, childNodes, collectShallow, functionName, parseSource, propertyName, someShallow } from './ast.js';
 
 const RELATIONAL = new Set(['<', '>', '<=', '>=']);
 const EQUALITY = new Set(['==', '!=', '===', '!==']);
-const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression', 'ObjectMethod', 'ClassMethod', 'ClassPrivateMethod']);
-const SKIPPED_KEYS = new Set(['leadingComments', 'trailingComments', 'innerComments', 'loc', 'extra']);
 const BASE_RISK = { risk: 9, throws: 6, boundary: 5, schema: 5, jsdoc: 4, nullish: 3, async: 3 };
 const SENSITIVE = /auth|login|token|password|payment|pay|billing|charge|refund|delete|remove|admin|permission|role|secret/i;
 const WRITE_METHODS = new Set(['create', 'update', 'updateOne', 'updateMany', 'findByIdAndUpdate', 'findOneAndUpdate', 'set', 'merge', 'insertOne']);
 const ARRAY_METHODS = new Set(['map', 'filter', 'forEach', 'reduce', 'find', 'some', 'every', 'flatMap']);
-const ROUTE_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 const SCHEMA_CALLS = new Set(['parse', 'safeParse', 'parseAsync', 'safeParseAsync']);
 const RESPONSE_ROOT = /^(data|res|resp|response|result|results|payload|body|json|req)$/i;
 
@@ -34,53 +31,6 @@ export const RULES = {
   'unhandled-async-route': 'async route handler has no error mapping; test that a rejected dependency does not hang or return 500',
   'unguarded-member-call': 'property chain is dereferenced without a guard; test the missing-property case',
 };
-
-function parseSource(text, file) {
-  const base = { sourceType: 'unambiguous', errorRecovery: true, allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true, attachComment: true };
-  const attempts = /\.[cm]?tsx?$/.test(file) ? [['typescript', 'jsx'], ['typescript']] : [['jsx'], ['jsx', 'flow']];
-  for (const plugins of attempts) {
-    try {
-      return parse(text, { ...base, plugins });
-    } catch {
-      // try the next plugin set; unparsable files are reported as skipped
-    }
-  }
-  return null;
-}
-
-function* childNodes(node) {
-  for (const key of Object.keys(node)) {
-    if (SKIPPED_KEYS.has(key)) continue;
-    const value = node[key];
-    if (Array.isArray(value)) {
-      for (const item of value) if (item && typeof item.type === 'string') yield item;
-    } else if (value && typeof value.type === 'string') yield value;
-  }
-}
-
-/** Depth-first search below `node`, not descending into nested functions. */
-function someShallow(node, predicate) {
-  const visit = (current, isRoot) => {
-    if (!isRoot && FUNCTION_TYPES.has(current.type)) return false;
-    if (predicate(current)) return true;
-    for (const child of childNodes(current)) if (visit(child, false)) return true;
-    return false;
-  };
-  return visit(node, true);
-}
-
-function collectShallow(node, predicate) {
-  const out = [];
-  someShallow(node, (current) => {
-    if (predicate(current)) out.push(current);
-    return false;
-  });
-  return out;
-}
-
-function propertyName(callee) {
-  return callee.type === 'MemberExpression' ? (callee.property.name ?? callee.property.value) : null;
-}
 
 function rootName(node) {
   let current = node;
@@ -112,27 +62,6 @@ function jsdocTags(comments = []) {
     for (const match of comment.value.matchAll(/@(?:throws|param|example)\b[^\n]*/g)) tags.push(match[0].replace(/\s+/g, ' ').trim());
   }
   return tags;
-}
-
-function routeName(call) {
-  if (call?.type !== 'CallExpression' || call.callee.type !== 'MemberExpression') return null;
-  const method = propertyName(call.callee);
-  if (!ROUTE_METHODS.has(method) && method !== 'use') return null;
-  const first = call.arguments[0];
-  return `${method.toUpperCase()} ${first?.type === 'StringLiteral' ? first.value : '*'}`;
-}
-
-function functionName(node, parent, enclosing) {
-  const direct = node.id?.name ?? node.key?.name ?? node.key?.value;
-  if (direct) return direct;
-  if (parent?.type === 'VariableDeclarator' && parent.id?.name) return parent.id.name;
-  if (parent?.type === 'ObjectProperty' && parent.key) return parent.key.name ?? parent.key.value ?? '<anonymous>';
-  if (parent?.type === 'AssignmentExpression') {
-    const { left } = parent;
-    if (left.type === 'MemberExpression') return propertyName(left) ?? '<anonymous>';
-    if (left.type === 'Identifier') return left.name;
-  }
-  return routeName(parent) ?? (enclosing === '<module>' ? '<anonymous>' : enclosing);
 }
 
 /** Scan one source text into candidate findings. Pure: does not touch the file system. */
