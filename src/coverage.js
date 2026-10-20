@@ -4,8 +4,8 @@ import path from 'node:path';
 const DEFAULT_LOCATIONS = ['coverage/coverage-final.json', 'coverage/lcov.info'];
 const BRANCH_TYPES = new Set(['if', 'cond-expr', 'binary-expr']);
 
-function normalize(file) {
-  const resolved = path.resolve(file);
+function normalize(file, base = process.cwd()) {
+  const resolved = path.resolve(base, file);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
@@ -16,10 +16,10 @@ export function parseIstanbul(text) {
   const files = new Map();
   for (const [file, data] of Object.entries(JSON.parse(text))) {
     const statements = Object.entries(data.statementMap ?? {}).map(([id, loc]) => ({
-      start: position(loc.start.line, loc.start.column), end: position(loc.end.line, loc.end.column ?? 0), hits: data.s?.[id] ?? 0,
+      start: position(loc.start.line, loc.start.column), end: position(loc.end.line, loc.end.column ?? 999999), hits: data.s?.[id] ?? 0,
     }));
     const branches = Object.entries(data.branchMap ?? {}).filter(([, branch]) => BRANCH_TYPES.has(branch.type)).map(([id, branch]) => ({
-      start: position(branch.loc.start.line, branch.loc.start.column), end: position(branch.loc.end.line, branch.loc.end.column ?? 0), counts: data.b?.[id] ?? [],
+      start: position(branch.loc.start.line, branch.loc.start.column), end: position(branch.loc.end.line, branch.loc.end.column ?? 999999), counts: data.b?.[id] ?? [],
     }));
     files.set(normalize(file), { statements, branches });
   }
@@ -27,7 +27,7 @@ export function parseIstanbul(text) {
 }
 
 /** Parse `lcov.info`. Line-granular: columns are unknown, so statements span whole lines. */
-export function parseLcov(text) {
+export function parseLcov(text, baseDir = process.cwd()) {
   const files = new Map();
   let current = null;
   const branchesByLine = new Map();
@@ -41,10 +41,10 @@ export function parseLcov(text) {
     if (line.startsWith('SF:')) {
       flush();
       current = { statements: [], branches: [] };
-      files.set(normalize(line.slice(3)), current);
+      files.set(normalize(line.slice(3), baseDir), current);
     } else if (current && line.startsWith('DA:')) {
       const [number, hits] = line.slice(3).split(',').map(Number);
-      current.statements.push({ start: position(number, 0), end: position(number, 999999), hits });
+      current.statements.push({ start: position(number, 0), end: position(number, 999999), hits, lineOnly: true });
     } else if (current && line.startsWith('BRDA:')) {
       const [number, , , taken] = line.slice(5).split(',');
       const counts = branchesByLine.get(Number(number)) ?? [];
@@ -60,7 +60,7 @@ export function parseLcov(text) {
 export function loadCoverage(file) {
   try {
     const text = fs.readFileSync(file, 'utf8');
-    const parsed = /\.json$/i.test(file) ? parseIstanbul(text) : parseLcov(text);
+    const parsed = /\.json$/i.test(file) ? parseIstanbul(text) : parseLcov(text, path.dirname(path.resolve(file)));
     return { ...parsed, source: file };
   } catch (error) {
     throw new Error(`cannot read coverage file ${file}: ${error.message}`);
@@ -80,7 +80,12 @@ function isCovered(finding, fileCoverage) {
     const enclosing = fileCoverage.branches.filter((b) => b.start <= start && b.end >= start).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
     if (enclosing) return enclosing.counts.length > 0 && enclosing.counts.every((count) => count > 0);
   }
-  return fileCoverage.statements.some((statement) => statement.hits > 0 && statement.start >= start && statement.start <= end);
+  return fileCoverage.statements.some((statement) => {
+    if (statement.hits <= 0) return false;
+    // lcov has no columns: a statement covers its whole line, so compare lines only.
+    if (statement.lineOnly) return Math.floor(statement.start / 1e6) >= finding.line && Math.floor(statement.start / 1e6) <= finding.endLine;
+    return statement.start >= start && statement.start <= end;
+  });
 }
 
 /**
