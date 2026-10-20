@@ -6,6 +6,12 @@
 - CI runs on Node 22 and 24 (Linux), plus Windows and macOS on Node 22.
 - Dev tooling: jest 30, mocha 12, vitest 5 (clears the open Dependabot alerts except a no-patch `sprintf-js` advisory in jest's dev-only config loader).
 
+### Added
+- `verify` detects the test runner like `generate` does when `--runner` is not given: the `package.json` nearest to the test file, within the project root (Vitest, then Jest, then Mocha, else `node:test`). The result says which runner was used and how: `runner: jest (detected from package.json)` in text, `runner` and `runnerSource` (`"flag"`, `"detected"` or `"default"`) in JSON, the API result and the MCP `verify` tool. `--command` runs are unaffected.
+
+### Fixed
+- `verify --runner vitest` no longer fails with "No test files found" when the test is outside the source file's folder (for example `tests/` next to `src/`). Runners now run in the root of the package that owns the test (they ran in the source file's folder, which Vitest takes as its root, so project config files were missed too); `--command` still runs in the source file's folder, and `verifyGenerated` takes an explicit `cwd`.
+
 ## 0.3.1
 
 Fixes from the 0.3.0 effectiveness report, and a research-backed answer to code that depends on API calls and services (see `docs/dependencies.md`).
