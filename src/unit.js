@@ -13,6 +13,13 @@ function paramsOf(node) {
 }
 
 const isFunctionNode = (node) => node && FUNCTION_TYPES.has(node.type);
+const isIdentifier = (node, name) => node?.type === 'Identifier' && node.name === name;
+/** `module.exports` */
+const isModuleExports = (node) => node?.type === 'MemberExpression' && isIdentifier(node.object, 'module') && propertyName(node) === 'exports';
+/** `exports.x`, `module.exports.x`, `exports['x']`, `module.exports['x']` */
+const isNamedExportTarget = (node) => node?.type === 'MemberExpression' && (isIdentifier(node.object, 'exports') || isModuleExports(node.object));
+const isObjectAssignToExports = (call) => call.callee.type === 'MemberExpression' && isIdentifier(call.callee.object, 'Object') && propertyName(call.callee) === 'assign'
+  && (isIdentifier(call.arguments[0], 'exports') || isModuleExports(call.arguments[0]));
 
 /**
  * Describe a module's top-level functions and how they are exported (ESM or CommonJS).
@@ -55,10 +62,21 @@ export function describeModule(text, file) {
       declare(statement.declaration, false);
       if (statement.declaration.type === 'FunctionDeclaration' && statement.declaration.id) defaultExport = statement.declaration.id.name;
       else if (statement.declaration.type === 'Identifier') defaultExport = statement.declaration.name;
+    } else if (statement.type === 'ExpressionStatement' && statement.expression.type === 'CallExpression' && isObjectAssignToExports(statement.expression)) {
+      // Object.assign(module.exports, { a, b }) / Object.assign(exports, { a })
+      style = 'cjs';
+      for (const argument of statement.expression.arguments.slice(1)) {
+        if (argument.type !== 'ObjectExpression') continue;
+        for (const prop of argument.properties) {
+          if (prop.type !== 'ObjectProperty' && prop.type !== 'ObjectMethod') continue;
+          const key = prop.key.name ?? prop.key.value;
+          if (prop.type === 'ObjectMethod') { register(key, prop); exported.set(key, key); } else if (prop.value.type === 'Identifier') exported.set(key, prop.value.name);
+          else if (isFunctionNode(prop.value)) { register(key, prop.value); exported.set(key, key); }
+        }
+      }
     } else if (statement.type === 'ExpressionStatement' && statement.expression.type === 'AssignmentExpression') {
       const { left, right } = statement.expression;
-      const target = left.type === 'MemberExpression' ? `${left.object.name ?? left.object.object?.name ?? ''}.${propertyName(left)}` : '';
-      if (target === 'module.exports' && left.object.name === 'module') {
+      if (isModuleExports(left)) {
         style = 'cjs';
         if (right.type === 'ObjectExpression') {
           for (const prop of right.properties) {
@@ -68,7 +86,7 @@ export function describeModule(text, file) {
             else if (isFunctionNode(prop.value)) { register(key, prop.value); exported.set(key, key); }
           }
         } else if (right.type === 'Identifier') defaultExport = right.name;
-      } else if (/^(?:module\.exports|exports)\.\w+$/.test(target) || (left.type === 'MemberExpression' && left.object.name === 'exports')) {
+      } else if (isNamedExportTarget(left)) {
         style = 'cjs';
         const key = propertyName(left);
         if (right.type === 'Identifier') exported.set(key, right.name);
