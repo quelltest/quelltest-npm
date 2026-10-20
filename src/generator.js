@@ -40,7 +40,9 @@ export function securityGate(source, file = 'generated.test.js') {
       }
     }
     if (node.type === 'Identifier' && FORBIDDEN_IDENTIFIERS.has(node.name)) {
-      const isPropertyName = (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed)
+      // The one allowed use of globalThis: `globalThis.fetch = <stub>` / restoring the saved original (generated fetch stubs).
+      const fetchStub = node.name === 'globalThis' && parent?.type === 'MemberExpression' && parent.object === node && !parent.computed && parent.property.name === 'fetch';
+      const isPropertyName = fetchStub || (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed)
         || (parent?.type === 'ObjectProperty' && parent.key === node && !parent.computed && !parent.shorthand);
       if (!isPropertyName) return fail(`generated source references ${node.name}`);
     }
