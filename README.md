@@ -19,18 +19,20 @@ Surveys and developer write-ups keep landing on the same problem: coverage tells
 
 | Command | What it does |
 | --- | --- |
-| `verify TEST --source FILE` | Runs the test on the original source, then on mutants of that source (in a throwaway copy of the project). The test must pass first, must contain an assertion that observes the code, and must fail on at least one mutant (`--min-score N` also requires N% of decided mutants killed). Survivors are listed; `--handoff FILE` writes them as Markdown with the diff, context and a specific instruction. `--function NAME` and `--findings` aim the mutants. |
+| `verify TEST --source FILE` | Runs the test on the original source, then on mutants of that source (in a throwaway copy of the project). The test must pass first, must contain an assertion that observes the code, and must fail on at least one mutant (`--min-score N` also requires N% of decided mutants killed). Survivors are listed; `--handoff FILE` writes them as Markdown with the diff, context and a specific instruction. `--function NAME` and `--findings` aim the mutants; `--command` runs your own integration command instead of a runner; survivors on code your test mocks are labelled. |
 | `gate --diff REF` | Compares changed test files with their version at the merge-base: deleted tests/files, skipped tests, `.only`, removed assertions, equality loosened to `ok`/truthy/not-null (errors, exit code 5), changed expected values (review items; `--strict` fails on them too). `--json` and `--sarif` available. |
 | `find [PATH]` | Parses files and lists risk-ranked candidates per function: thrown errors, boundaries, nullish paths, JSDoc contracts, schema calls, and a rule pack for defects that *lack* a guard (regex built from request data, request body written to a document, NoSQL operator injection, path traversal, open redirects, `\|\|` that swallows `0`, unguarded `jwt.verify`/`bcrypt.compare`, check-then-create races, missing `await`, hard-coded secrets, `eval` of input, unparsed request JSON). One hop of data flow from `req.body/query/params` is tracked. `--diff REF` limits to changed lines, `--sarif` for code scanning. |
 | `score [PATH]` | Share of candidates your tests execute, from Istanbul `coverage-final.json` or `lcov.info`. Without coverage evidence it prints `not scored`, never `0/100`. |
-| `generate [PATH]` | Writes tests for guards it can analyse statically (parameter compared with literals, `typeof`, truthiness, JSDoc `@example`) for the detected runner; everything else becomes a TODO note, never a placeholder test. Route handlers get a list of request cases derived from their guards. Candidates your tests already cover are skipped. `--verify` keeps only tests that pass on the original and fail on a source mutant. |
+| `generate [PATH]` | Writes tests for guards it can analyse statically (a parameter or one of its properties compared with literals, `typeof`, truthiness, what an injected client, model or global `fetch` returns, JSDoc `@example`) for the detected runner; everything else becomes a TODO note, never a placeholder test. Route handlers get a list of request cases derived from their guards. Candidates your tests already cover are skipped. `--verify` keeps only tests that pass on the original and fail on a source mutant. |
 | `mcp` | MCP server on stdio exposing `find`, `verify`, `gate` for coding agents. See [docs/agents.md](docs/agents.md). |
+| `mocks [PATH] --examples FILE` | Compares stubs you annotate (`// quell-mock GET /users/:id`) with recorded examples (HAR, a JSON map, or OpenAPI JSON): fields only the recording has, fields only the stub invents, type mismatches. Exit code 6 on drift. See [docs/dependencies.md](docs/dependencies.md). |
+| `eval` | Runs the bundled benchmark (rule recall on known defects, false positives on guarded code, verifier accuracy on strong vs weak tests). |
 
 Findings are ranked by risk (injection and unsafe writes first, enum comparisons and numeric fallbacks last). Test files, config and generated output are skipped; `--include`, `--exclude`/`--ignore`, `--include-tests` and `.quellignore` adjust that. IDs hash the function name and the evidence, not the line number, so they survive unrelated edits.
 
 ### Exit codes
 
-`0` ok · `1` score below `--threshold` · `2` usage or runtime error · `3` `--threshold` given but nothing to score from · `4` `verify` did not verify the test · `5` `gate` found weakened tests.
+`0` ok · `6` `mocks` found stub drift · `1` score below `--threshold` · `2` usage or runtime error · `3` `--threshold` given but nothing to score from · `4` `verify` did not verify the test · `5` `gate` found weakened tests.
 
 ### Suppression
 
@@ -55,6 +57,7 @@ Choose Stryker for a complete mutation score across a suite. Choose an LLM gener
 
 ## What it does not do
 
+- It does not know whether your stubs resemble the real services. It verifies that tests notice changes in your code; `quell mocks` and `verify --command` narrow the gap, see [docs/dependencies.md](docs/dependencies.md).
 - It does not generate tests for most real code. Generation handles named, exported functions with statically readable guards; Express handlers, React components and everything else become notes (route handlers also list the request cases their guards imply).
 - Findings are review hints, not proof of defects. Line-level rules cannot see wrong business rules (`eval/defects.json` lists the known misses).
 - `verify` runs your tests once per mutant (default cap 30), so it is slower than a plain test run. It mirrors the project into a temp directory; very large projects fall back to in-place mutation with a backup file (`--in-place` forces it).

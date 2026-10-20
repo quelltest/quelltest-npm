@@ -21,3 +21,7 @@ export interface GateResult { issues: GateIssue[]; ok: boolean; checked: number 
 export declare function gate(ref: string, options?: { cwd?: string; strict?: boolean }): GateResult;
 export declare function gateSarif(result: { issues: GateIssue[] }, version?: string): object;
 export declare function renderHandoff(result: VerifyResult, options?: { sourceText?: string }): string;
+export interface Example { method: string; path: string; status?: number; body: unknown }
+export interface StubProblem { file: string; line: number; route: string; path: string; kind: 'missing' | 'extra' | 'type' | 'no-example' | 'annotation'; message: string }
+export declare function loadExamples(file: string): Example[];
+export declare function checkStubs(testText: string, file: string, examples: Example[]): StubProblem[];

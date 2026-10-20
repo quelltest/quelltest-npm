@@ -5,17 +5,20 @@ import { pathToFileURL } from 'node:url';
 import { report, generate, generateWithLlm, scan, toSarif, verifyGenerated } from './index.js';
 import { renderHandoff } from './handoff.js';
 import { gate, gateSarif } from './gate.js';
+import { checkStubs, loadExamples } from './contract.js';
+import { discoverFiles } from './files.js';
 import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from · 4 verify: test not verified · 5 gate: weakened tests found
-const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3, notVerified: 4, weakened: 5 };
+// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from · 4 verify: test not verified · 5 gate: weakened tests found · 6 mocks: stub drift found
+const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3, notVerified: 4, weakened: 5, drift: 6 };
 
 const HELP = `Usage: quell <${COMMANDS.join('|')}> [PATH] [options]
        quell verify TEST_FILE --source FILE [--function NAME] [--runner NAME]
        quell gate --diff REF [--strict] [--json|--sarif]
        quell mcp                       (MCP server on stdio: tools find, verify, gate)
+       quell mocks [PATH] --examples FILE [--json]   (check "// quell-mock GET /path" stubs against recorded examples)
        quell eval                      (run the bundled benchmark: rule recall, false positives, verifier accuracy)
 
 PATH may be a directory or a single file (default: .).
@@ -45,6 +48,7 @@ Options:
   --command CMD          verify: run your own command instead of a runner, e.g. "npm run test:integration -- {test}"
   --timeout SECONDS      verify: per-run timeout (default 60)
   --in-place             verify: mutate the source file itself instead of a temporary copy
+  --examples FILE        mocks: HAR file, JSON examples file or OpenAPI JSON with recorded responses
   --strict               gate: also fail on 'expected value changed' review items
   --runner NAME          generate/verify: node, jest, vitest or mocha (generate default: detected from package.json)
   -h, --help | -v, --version`;
@@ -102,6 +106,21 @@ async function run(argv) {
   const { command, root, hasPath, options } = parseArgs(argv);
   if (options.help) { console.log(HELP); return EXIT.ok; }
   if (options.version) { console.log(VERSION); return EXIT.ok; }
+  if (command === 'mocks') {
+    if (!options.examples) throw new UsageError('mocks requires --examples FILE (a HAR file, a JSON examples file or OpenAPI JSON)');
+    const examples = loadExamples(options.examples);
+    const problems = [];
+    for (const file of discoverFiles(root, { includeTests: true })) {
+      const text = fs.readFileSync(file, 'utf8');
+      if (text.includes('quell-mock')) problems.push(...checkStubs(text, path.relative(process.cwd(), file).replaceAll('\\', '/'), examples));
+    }
+    if (options.json) console.log(JSON.stringify({ examples: examples.length, problems }, null, 2));
+    else {
+      console.log(problems.length ? `Stub drift: ${problems.length} difference(s) against ${examples.length} recorded example(s)` : `No stub drift against ${examples.length} recorded example(s)`);
+      for (const item of problems) console.log(`  ${item.file}:${item.line} ${item.route} ${item.path} — ${item.message}`);
+    }
+    return problems.length ? EXIT.drift : EXIT.ok;
+  }
   if (command === 'eval') {
     const { evaluate, evaluateGate } = await import('../scripts/eval.mjs');
     const rules = evaluate();

@@ -1,6 +1,6 @@
 {
   "name": "quelltest",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Free, offline gate for AI-written tests: proves tests fail when the code is wrong (mutation verification), detects weakened tests in a change, and finds untested risky edges in JavaScript and TypeScript.",
   "type": "module",
   "bin": {
@@ -27,7 +27,7 @@
     "test": "node --test",
     "eval": "node scripts/eval.mjs",
     "test:verify": "node scripts/verification-smoke.mjs",
-    "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check src/scan.js && node --check src/files.js && node --check src/unit.js && node --check src/synthesize.js && node --check src/runner.js && node --check src/ast.js && node --check src/backup.js && node --check src/handoff.js && node --check src/gate.js && node --check src/mcp.js && node --check src/routes.js && node --check src/mutate.js && node --check src/score.js && node --check src/diff.js && node --check src/sarif.js && node --check src/coverage.js && node --check src/cli-args.js && node --check scripts/verification-smoke.mjs && node --check scripts/eval.mjs",
+    "check": "node --check src/index.js && node --check src/cli.js && node --check src/generator.js && node --check src/verification.js && node --check src/scan.js && node --check src/files.js && node --check src/unit.js && node --check src/synthesize.js && node --check src/runner.js && node --check src/ast.js && node --check src/backup.js && node --check src/handoff.js && node --check src/mocks.js && node --check src/contract.js && node --check src/gate.js && node --check src/mcp.js && node --check src/routes.js && node --check src/mutate.js && node --check src/score.js && node --check src/diff.js && node --check src/sarif.js && node --check src/coverage.js && node --check src/cli-args.js && node --check scripts/verification-smoke.mjs && node --check scripts/eval.mjs",
     "pack:check": "npm pack --dry-run",
     "test:ci": "npm test && npm run test:verify && npm run check && npm run pack:check"
   },
