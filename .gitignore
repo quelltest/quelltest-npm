@@ -3,3 +3,4 @@ coverage/
 .quelltest/
 token.txt
 *.log
+.tmp-matrix/

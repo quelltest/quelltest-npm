@@ -1,56 +1,73 @@
-# Quelltest for npm
+# Quelltest
 
-Offline-first edge-case discovery for JavaScript and TypeScript. Quelltest reads your source with a real parser (it never executes it), lists the guards, errors and risky patterns that deserve a test, tells you which of them your existing tests already run, and can generate tests that are checked against mutants of your own code before they are kept.
+**The free, offline gate for AI-written tests.** Your agent says the tests pass. Quelltest proves they would fail if the code were wrong, and fails the build when a change weakens them.
 
-It complements Jest, Vitest, Mocha and `node:test`; it is not a replacement for a test runner.
-
-## Quick start
+It reads JavaScript and TypeScript with a real parser, aims mutants at the places where bugs hide (guards, sanitisers, `await`, `??` fallbacks, thrown errors), runs your own tests against them, and reports the mutants nobody caught. It works with Jest, Vitest, Mocha and `node:test`, never sends code anywhere, and needs no Docker.
 
 ```bash
-npm install
-npx quell find src/                      # ranked candidates, top 10
-npx quell find src/ --diff origin/main   # only lines changed in this branch
-npx quell score src/ --coverage coverage/coverage-final.json --threshold 60
-npx quell generate src/ --write --verify # real tests, verified against source mutants
+npm install --save-dev quelltest
+npx quell verify tests/pay.test.js --source src/pay.js     # would this test catch a bug?
+npx quell gate --diff origin/main                          # did this change weaken the tests?
+npx quell find src --diff origin/main --coverage coverage/lcov.info   # risky edges with no real test
 ```
 
-## What it does
+## Why
 
-| Command | Behaviour |
+Surveys and developer write-ups keep landing on the same problem: coverage tells you code ran, not that tests would notice a bug, and an agent that writes both code and tests will happily weaken an assertion to get a green check. Mutation testing is the independent check, but it has been slow, noisy and awkward to run on every change. Quelltest makes it fast (a few targeted mutants per test file), quiet (suppression, equivalent-mutant handling) and usable by agents (MCP server, survivor handoff).
+
+## Commands
+
+| Command | What it does |
 | --- | --- |
-| `find [PATH]` | Parses files (directory or single file) and reports candidates per function: thrown errors, boundary conditions (including conditions that call functions), nullish paths, JSDoc contracts, schema calls, async functions, and a rule pack for defects that *lack* a guard (regex built from user input, `Object.assign(doc, req.body)`, `\|\|` that swallows `0`, unguarded `jwt.verify`/`bcrypt.compare`, check-then-create races, async routes without error mapping, unguarded `data.items.map`). |
-| `score [PATH]` | Share of candidates your tests actually execute, from Istanbul `coverage-final.json` or `lcov.info` (auto-detected in `./coverage`). A boundary counts only when both branches ran. **Without coverage evidence it prints `not scored`**, never `0/100`. |
-| `generate [PATH]` | Writes tests that import the unit, call it with boundary values and assert; JSDoc `@example fn(1) // => 2` lines become assertions. Anything it cannot reason about becomes a `.todo.md` note. |
-| `verify TEST --source FILE` | Runs a test on the original source, then on mutants of that source (flipped operators, removed guards and throws); the test must fail on at least one. |
+| `verify TEST --source FILE` | Runs the test on the original source, then on mutants of that source (in a throwaway copy of the project). The test must pass first, must contain an assertion that observes the code, and must fail on at least one mutant (`--min-score N` also requires N% of decided mutants killed). Survivors are listed; `--handoff FILE` writes them as Markdown with the diff, context and a specific instruction. `--function NAME` and `--findings` aim the mutants. |
+| `gate --diff REF` | Compares changed test files with their version at the merge-base: deleted tests/files, skipped tests, `.only`, removed assertions, equality loosened to `ok`/truthy/not-null (errors, exit code 5), changed expected values (review items; `--strict` fails on them too). `--json` and `--sarif` available. |
+| `find [PATH]` | Parses files and lists risk-ranked candidates per function: thrown errors, boundaries, nullish paths, JSDoc contracts, schema calls, and a rule pack for defects that *lack* a guard (regex built from request data, request body written to a document, NoSQL operator injection, path traversal, open redirects, `\|\|` that swallows `0`, unguarded `jwt.verify`/`bcrypt.compare`, check-then-create races, missing `await`, hard-coded secrets, `eval` of input, unparsed request JSON). One hop of data flow from `req.body/query/params` is tracked. `--diff REF` limits to changed lines, `--sarif` for code scanning. |
+| `score [PATH]` | Share of candidates your tests execute, from Istanbul `coverage-final.json` or `lcov.info`. Without coverage evidence it prints `not scored`, never `0/100`. |
+| `generate [PATH]` | Writes tests for guards it can analyse statically (parameter compared with literals, `typeof`, truthiness, JSDoc `@example`) for the detected runner; everything else becomes a TODO note, never a placeholder test. Route handlers get a list of request cases derived from their guards. Candidates your tests already cover are skipped. `--verify` keeps only tests that pass on the original and fail on a source mutant. |
+| `mcp` | MCP server on stdio exposing `find`, `verify`, `gate` for coding agents. See [docs/agents.md](docs/agents.md). |
 
-Test files, config, generated output and anything in `.quellignore` are skipped; use `--include`, `--exclude`/`--ignore` and `--include-tests` to adjust. Findings are ranked by risk; `--all` and `--top N` control the list. `--json` prints the full report, `--sarif` prints SARIF 2.1.0 for GitHub code scanning.
-
-Finding IDs hash the function name and the normalised evidence, not the line number, so they survive unrelated edits.
-
-### Generated tests
-
-`generate` detects the runner (Vitest, Jest/react-scripts, Mocha, else `node:test`) and module system (ESM/CommonJS) and writes matching files into `tests/quelltest/` (change with `--destination`, override with `--runner`). Statuses:
-
-- `GENERATED` — a real test, not run yet.
-- `VERIFIED` — passed on the original code and failed on a source mutant (`--verify`).
-- `TODO` — no test could be derived; a note is written instead. A note is not a test.
-- `FLAGGED` — rejected by the security gate (which inspects the generated code, not quoted evidence) or as a duplicate.
-
-Only simple guards (parameters compared with literals, `typeof`, truthiness, joined by `||`) are turned into tests today. `--llm MODULE` lets you plug in your own model for the rest: the module's default export receives the finding and the function source and returns test code, which must pass the same gates. quelltest itself never sends code anywhere. Note that accepted LLM-written tests are executed to verify them: the security gate (allowlisted imports, no `process`/`global`/`eval`/network references) is defence in depth, not a sandbox, so review model output as you would any code.
+Findings are ranked by risk (injection and unsafe writes first, enum comparisons and numeric fallbacks last). Test files, config and generated output are skipped; `--include`, `--exclude`/`--ignore`, `--include-tests` and `.quellignore` adjust that. IDs hash the function name and the evidence, not the line number, so they survive unrelated edits.
 
 ### Exit codes
 
-`0` ok · `1` score below `--threshold` · `2` usage or runtime error · `3` `--threshold` given but there is no score (no coverage evidence) · `4` `verify` did not verify the test.
+`0` ok · `1` score below `--threshold` · `2` usage or runtime error · `3` `--threshold` given but nothing to score from · `4` `verify` did not verify the test · `5` `gate` found weakened tests.
 
-## Limitations
+### Suppression
 
-- Findings are review hints, not proof of defects. Line-level rules cannot see logic errors such as wrong business rules (see `eval/defects.json` for the known misses).
+`// quell-ignore [rule]` (finding), `// quell-ignore-file`, `// quell-ignore-mutant <reason>` (equivalent mutant), `// quell-allow-weaken <reason>` (inside a test, for `gate`).
+
+## How it compares
+
+Facts as of 20 Oct 2026 from public pages and papers; check each project for current details.
+
+| | Quelltest | Stryker (JS) | Flawd | LLM test generators (Qodo, Copilot, Cover-Agent) |
+| --- | --- | --- | --- | --- |
+| Price / licence | Free, Apache-2.0 | Free, open source | Paid, closed source | Paid or API-metered |
+| Needs a model or network | No (an `--llm` hook is opt-in and runs your own code) | No | No | Yes |
+| Aims mutants at specific risks | Yes (rule-driven) | Generic mutators, configurable | Mutates covered lines; `--diff` | n/a |
+| Detects weakened tests in a change | Yes (`gate`) | No | Not documented | No |
+| Isolation | Temporary project copy, no Docker | Sandbox copies | Docker/Podman per mutant | n/a |
+| Agent interface | MCP server, handoff report | Reports | `handoff` Markdown | n/a |
+| Full-suite mutation score | No (per test file / per change) | Yes | Yes | n/a |
+| Writes tests | Simple guards only; notes otherwise | No | No | Yes, arbitrary code |
+
+Choose Stryker for a complete mutation score across a suite. Choose an LLM generator when you need tests written for arbitrary code, and put `verify` and `gate` in front of what it writes.
+
+## What it does not do
+
+- It does not generate tests for most real code. Generation handles named, exported functions with statically readable guards; Express handlers, React components and everything else become notes (route handlers also list the request cases their guards imply).
+- Findings are review hints, not proof of defects. Line-level rules cannot see wrong business rules (`eval/defects.json` lists the known misses).
+- `verify` runs your tests once per mutant (default cap 30), so it is slower than a plain test run. It mirrors the project into a temp directory; very large projects fall back to in-place mutation with a backup file (`--in-place` forces it).
 - Statement coverage is matched to candidates by position; `lcov.info` is line-granular.
-- Mutation verification runs your tests once per mutant (up to 30 per test), so `--verify` is slower than a plain scan.
+- It is young: see the changelog, and `npm run eval` for the measurements below.
 
 ## Measuring quelltest itself
 
-`npm run eval` scans `eval/defects/` (known defects from a real code base) and `eval/clean/` (guarded code) and prints recall and false positives; the test suite fails if recall drops below 50% or the clean files produce risk findings. The fixtures were written by the rule author, so treat this as a regression guard rather than an independent benchmark; it reports `recall` over all 18 defects and `detectableRecall` over the 11 that line-level rules can see.
+`npm run eval` reports, on author-written fixtures (treat as regression guards, not independent benchmarks):
+
+- **Rule recall** on 18 defects reported against a real code base: `eval/defects.json` (7 are documented known misses), and risk-rule false positives on guarded code in `eval/clean/`.
+- **Verifier accuracy**: `eval/gate/` holds, per case, a strong test and weak variants (tautology, literal-only, no assertion, wrong target, happy-path only). The strong tests must be accepted and every weak one rejected at a 60% mutation-score floor.
+- `test/matrix.test.js` generates and verifies tests under real Jest, Mocha, Vitest and `node:test` (CommonJS and ESM).
 
 ## Development
 
@@ -61,6 +78,6 @@ npm run pack:check
 npm run test:ci
 ```
 
-CI runs on Node 20, 22 and 24 (plus Windows and macOS on Node 22). A PR workflow runs quelltest on every pull request, limited to changed lines, and publishes the report to the job summary and a PR comment. Ruff and Flake8 are conditional jobs that only run when Python files are added.
+CI runs on Node 20, 22 and 24 (plus Windows and macOS on Node 22). A PR workflow runs quelltest on every pull request, limited to changed lines, and publishes the report to the job summary and a PR comment.
 
 Licensed under the [Apache License 2.0](LICENSE). Maintained by Shashank Bindal.
