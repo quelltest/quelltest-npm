@@ -33,6 +33,7 @@ const NUMERIC_CALL = /^(?:Number|parseInt|parseFloat|Math\.\w+)$/;
 const QUERY_RETURNING = new Set(['find', 'findOne', 'findById', 'findByIdAndUpdate', 'findOneAndUpdate', 'findByIdAndDelete', 'findOneAndDelete', 'countDocuments', 'exists']);
 // Reading these members off a query/promise is harmless (chaining a query builder, then/catch); reading data fields is the bug.
 const QUERY_BUILDER = new Set(['then', 'catch', 'finally', 'exec', 'lean', 'populate', 'select', 'sort', 'limit', 'skip', 'where', 'session', 'collation', 'hint', 'maxTimeMS']);
+const ORM_MENTION = /mongoose|sequelize|prisma|typeorm|mongodb|knex|objection|bookshelf|drizzle|\.populate\(|\bmodels?\b/i;
 const SECRET_ARG_CALLS = /^(?:jwt\.sign|jwt\.verify|jsonwebtoken\.sign|jsonwebtoken\.verify|crypto\.createHmac|createHmac)$/;
 const SECRET_NAME = /(?:secret|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?token|auth[_-]?token)$/i;
 
@@ -301,7 +302,9 @@ export function scanSource(text, file, options = {}) {
     const start = frames.at(-1).node.start;
     const before = text.slice(start, node.start);
     const target = slice(node, 80);
-    return ["'/'", '"/"', '`/`'].some((quoted) => before.includes(`${target}.startsWith(${quoted})`));
+    // The standard pair is needed: `startsWith('/')` alone accepts `//evil.example`.
+    const has = (prefix) => ["'", '"', '`'].some((quote) => before.includes(`${target}.startsWith(${quote}${prefix}${quote})`));
+    return has('/') && has('//');
   };
 
   /** A redirect target with a fixed single-slash prefix stays on this site (`'/users/' + id`); `//host` does not. */
@@ -336,8 +339,21 @@ export function scanSource(text, file, options = {}) {
   /** A network call is handled inside try/catch, a known async wrapper, or a promise chain that ends in `.catch`. */
   const networkHandled = () => inTryOrWrapper() || ancestors.slice(0, -1).some((n) => n.type === 'CallExpression' && propertyName(n.callee) === 'catch');
 
-  const inTryOrWrapper = () => ancestors.slice(0, -1).some((n) => n.type === 'TryStatement'
-    || (n.type === 'CallExpression' && ASYNC_WRAPPERS.test(n.callee.name ?? propertyName(n.callee) ?? '')));
+  /**
+   * Handled where it matters: inside the `try` block (not its `catch`/`finally`), or inside a function handed to an async
+   * wrapper. The walk stops at the first function boundary, so a callback created inside a `try` is not covered by it.
+   */
+  const inTryOrWrapper = () => {
+    for (let i = ancestors.length - 2; i >= 0; i -= 1) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'TryStatement' && ancestor.block === ancestors[i + 1]) return true;
+      if (FUNCTION_TYPES.has(ancestor.type)) {
+        const parent = ancestors[i - 1];
+        return parent?.type === 'CallExpression' && ASYNC_WRAPPERS.test(parent.callee.name ?? propertyName(parent.callee) ?? '');
+      }
+    }
+    return false;
+  };
 
   const onFunction = (node) => {
     const tags = jsdocTags(node.leadingComments ?? ancestors.at(-2)?.leadingComments ?? ancestors.at(-3)?.leadingComments);
@@ -437,12 +453,17 @@ export function scanSource(text, file, options = {}) {
     emit(node, 'risk', { rule: 'hard-coded-secret', evidence: `${name} = "…"` });
   };
 
+  // `ctx.save()` is not a database write: require a Model-like receiver (`User.create`) or a module that uses an ORM/ODM.
+  const mentionsOrm = ORM_MENTION.test(text);
+  const looksLikeOrmCall = (callee) => mentionsOrm || /^[A-Z]/.test(rootName(callee.object) ?? '');
+
   /** `const user = User.findById(id); return user.name;` in an async function: the field is read off a promise. */
   const isUnawaitedQueryRead = (declarator) => {
     const frame = frames.at(-1);
     const { init, id } = declarator;
     if (!frame.node.async || id.type !== 'Identifier' || init?.type !== 'CallExpression' || init.callee.type !== 'MemberExpression') return false;
-    if (!QUERY_RETURNING.has(propertyName(init.callee)) || init.callee.object.type === 'CallExpression') return false;
+    if (!QUERY_RETURNING.has(propertyName(init.callee)) || init.callee.object.type === 'CallExpression' || !looksLikeOrmCall(init.callee)) return false;
+    if (FUNCTION_TYPES.has(init.arguments[0]?.type)) return false; // Array.prototype.find(predicate)
     const name = id.name;
     const awaited = someShallow(frame.node.body, (n) => n.type === 'AwaitExpression' && n.argument.type === 'Identifier' && n.argument.name === name);
     const readsField = someShallow(frame.node.body, (n) => n.type === 'MemberExpression' && n.object.type === 'Identifier' && n.object.name === name && !QUERY_BUILDER.has(propertyName(n)));
@@ -462,7 +483,7 @@ export function scanSource(text, file, options = {}) {
       if (current.computed && current.property.type === 'NumericLiteral') indexed = true;
       current = current.object;
     }
-    return current.type === 'Identifier' && /^(?:res|resp|response|r|result|payload|json)$/i.test(current.name) && (indexed || depth >= 4);
+    return current.type === 'Identifier' && /^(?:res|resp|response|r|result|payload|json)$/i.test(current.name) && ((indexed ? depth >= 3 : depth >= 4));
   };
 
   const onVisit = (node) => {
@@ -495,7 +516,7 @@ export function scanSource(text, file, options = {}) {
       if (node.left.type === 'MemberExpression') onSecret(propertyName(node.left), node.right, node);
     }
     if (node.type === 'ExpressionStatement' && node.expression.type === 'CallExpression' && frames.at(-1).node.async
-      && node.expression.callee.type === 'MemberExpression' && PROMISE_METHODS.has(propertyName(node.expression.callee))) {
+      && node.expression.callee.type === 'MemberExpression' && PROMISE_METHODS.has(propertyName(node.expression.callee)) && looksLikeOrmCall(node.expression.callee)) {
       emit(node.expression, 'risk', { rule: 'missing-await' });
     }
     if (node.type === 'LogicalExpression' && node.operator === '||') onFallback(node);
