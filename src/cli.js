@@ -5,17 +5,21 @@ import { pathToFileURL } from 'node:url';
 import { report, generate, generateWithLlm, scan, toSarif, verifyGenerated } from './index.js';
 import { renderHandoff } from './handoff.js';
 import { gate, gateSarif } from './gate.js';
+import { checkStubs, loadExamples } from './contract.js';
+import { discoverFiles } from './files.js';
 import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from · 4 verify: test not verified · 5 gate: weakened tests found
-const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3, notVerified: 4, weakened: 5 };
+// Exit codes: 0 ok · 1 score below --threshold · 2 usage or runtime error · 3 --threshold set but nothing to score from · 4 verify: test not verified · 5 gate: weakened tests found · 6 mocks: stub drift found
+const EXIT = { ok: 0, belowThreshold: 1, error: 2, notScored: 3, notVerified: 4, weakened: 5, drift: 6 };
 
 const HELP = `Usage: quell <${COMMANDS.join('|')}> [PATH] [options]
        quell verify TEST_FILE --source FILE [--function NAME] [--runner NAME]
        quell gate --diff REF [--strict] [--json|--sarif]
        quell mcp                       (MCP server on stdio: tools find, verify, gate)
+       quell mocks [PATH] --examples FILE [--json]   (check "// quell-mock GET /path" stubs against recorded examples)
+       quell eval                      (run the bundled benchmark: rule recall, false positives, verifier accuracy)
 
 PATH may be a directory or a single file (default: .).
 
@@ -29,6 +33,7 @@ Options:
   --threshold N          exit ${EXIT.belowThreshold} when the score is below N (${EXIT.notScored} when it cannot be scored)
   --include GLOB         only scan matching files (repeatable)
   --exclude GLOB         skip matching files (repeatable; alias --ignore; also .quellignore)
+  --min-confidence L     only findings at least this trustworthy: low, medium or high
   --include-tests        scan test files too
   --write                generate: write tests (and TODO notes) to disk
   --destination DIR      generate: output directory (default: tests/quelltest)
@@ -40,7 +45,11 @@ Options:
   --findings             verify: aim mutation at lines the scanner flagged
   --min-score N          verify: also require N% of mutants killed
   --handoff FILE         verify: write surviving mutants as Markdown an agent can act on
+  --command CMD          verify: run your own command instead of a runner, e.g. "npm run test:integration -- {test}"
+  --infra-exit CODE      verify: exit code your command uses for "the environment failed" (repeatable; not counted as a kill)
+  --timeout SECONDS      verify: per-run timeout (default 60)
   --in-place             verify: mutate the source file itself instead of a temporary copy
+  --examples FILE        mocks: HAR file, JSON examples file or OpenAPI JSON with recorded responses
   --strict               gate: also fail on 'expected value changed' review items
   --runner NAME          generate/verify: node, jest, vitest or mocha (generate default: detected from package.json)
   -h, --help | -v, --version`;
@@ -52,7 +61,7 @@ function printFind(result, options) {
   const shown = pending.slice(0, limit);
   const covered = result.findings.length - pending.length;
   console.log(`Quell scan — ${pending.length} edge-case candidates${evidence ? ` not executed by tests (${covered} already covered)` : ''}, showing ${shown.length}`);
-  for (const item of shown) console.log(`• ${item.file}:${item.line} [${item.rule ?? item.category}] ${item.function} — ${item.suggestion}`);
+  for (const item of shown) console.log(`• ${item.file}:${item.line} [${item.rule ?? item.category}] ${item.function} — ${item.suggestion} (${item.confidence})`);
   if (pending.length > shown.length) console.log(`… ${pending.length - shown.length} more (use --all or --top N)`);
   if (!evidence) console.log('Coverage evidence: none (pass --coverage FILE to hide candidates your tests already run)');
 }
@@ -69,7 +78,7 @@ function runVerify(testFile, options) {
   const lines = options.findings ? scan(options.source, { includeTests: true }).findings.map((item) => [item.line, item.endLine]) : undefined;
   const result = verifyGenerated(null, {
     sourceFile: options.source, testPath: testFile, runner: options.runner, functions: options.function, lines,
-    inPlace: options['in-place'], minScore: options['min-score'],
+    inPlace: options['in-place'], minScore: options['min-score'], command: options.command, infraExitCodes: options['infra-exit'], timeoutMs: options.timeout ? options.timeout * 1000 : undefined,
   });
   if (options.handoff) fs.writeFileSync(options.handoff, renderHandoff(result, { sourceText: fs.existsSync(options.source) ? fs.readFileSync(options.source, 'utf8') : '' }), 'utf8');
   if (options.json) console.log(JSON.stringify(result, null, 2));
@@ -98,6 +107,28 @@ async function run(argv) {
   const { command, root, hasPath, options } = parseArgs(argv);
   if (options.help) { console.log(HELP); return EXIT.ok; }
   if (options.version) { console.log(VERSION); return EXIT.ok; }
+  if (command === 'mocks') {
+    if (!options.examples) throw new UsageError('mocks requires --examples FILE (a HAR file, a JSON examples file or OpenAPI JSON)');
+    const examples = loadExamples(options.examples);
+    const problems = [];
+    for (const file of discoverFiles(root, { includeTests: true })) {
+      const text = fs.readFileSync(file, 'utf8');
+      if (text.includes('quell-mock')) problems.push(...checkStubs(text, path.relative(process.cwd(), file).replaceAll('\\', '/'), examples));
+    }
+    if (options.json) console.log(JSON.stringify({ examples: examples.length, problems }, null, 2));
+    else {
+      console.log(problems.length ? `Stub drift: ${problems.length} difference(s) against ${examples.length} recorded example(s)` : `No stub drift against ${examples.length} recorded example(s)`);
+      for (const item of problems) console.log(`  ${item.file}:${item.line} ${item.route} ${item.path} — ${item.message}`);
+    }
+    return problems.length ? EXIT.drift : EXIT.ok;
+  }
+  if (command === 'eval') {
+    const { evaluate, evaluateGate } = await import('../scripts/eval.mjs');
+    const rules = evaluate();
+    const verifier = evaluateGate();
+    console.log(JSON.stringify({ rules, verifier: { ...verifier, rows: undefined } }, null, 2));
+    return rules.noise.length || verifier.wrong.length ? EXIT.belowThreshold : EXIT.ok;
+  }
   if (command === 'gate') return runGate(options);
   if (command === 'mcp') {
     const { serve } = await import('./mcp.js');
@@ -108,7 +139,7 @@ async function run(argv) {
     if (!hasPath) throw new UsageError('verify requires a TEST_FILE');
     return runVerify(root, options);
   }
-  const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff };
+  const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff, minConfidence: options['min-confidence'] };
   const result = report(root, scanOptions);
   if (command === 'generate') {
     const generateOptions = { write: options.write, destination: options.destination, runner: options.runner, verify: options.verify, includeCovered: options['include-covered'] };

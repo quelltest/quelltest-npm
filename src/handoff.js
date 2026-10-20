@@ -19,6 +19,8 @@ export function renderHandoff(result, { sourceText = '' } = {}) {
   out.push(`- Result: ${result.verified ? 'verified' : 'NOT verified'} — ${result.killed ?? 0}/${result.total ?? 0} mutants killed${result.mutationScore == null ? '' : ` (${result.mutationScore}%)`}${result.reason ? `; ${result.reason}` : ''}`);
   if (result.inconclusive) out.push(`- Inconclusive: ${result.inconclusive} mutant(s) timed out or could not run (not counted as kills)`);
   if (result.ignored) out.push(`- Ignored by \`quell-ignore-mutant\`: ${result.ignored}`);
+  const mockedSurvivors = survivors.filter((mutant) => mutant.mockBoundary);
+  if (mockedSurvivors.length) out.push(`- On mocked code: ${mockedSurvivors.length} of ${survivors.length} survivors touch ${[...new Set(mockedSurvivors.map((mutant) => `\`${mutant.mockBoundary}\``))].join(', ')}, which the test replaces with a double`);
   out.push('');
   if (!survivors.length) {
     out.push('No surviving mutants.');
@@ -32,6 +34,7 @@ export function renderHandoff(result, { sourceText = '' } = {}) {
     const context = lines.slice(from, mutant.line + 2);
     if (context.length) out.push('Context:', '', '```js', ...context.map((text, offset) => `${String(from + offset + 1).padStart(4)}  ${text}`), '```', '');
     out.push(`**What to do:** ${(GUIDANCE[mutant.kind] ?? GUIDANCE.operator)(mutant)}`, '');
+    if (mutant.mockBoundary) out.push(`**Mock boundary:** this test mocks \`${mutant.mockBoundary}\`, so this change may only be observable against the real dependency. Either assert the interaction (the mock was called with the right arguments, in order) or add a real-dependency test (Testcontainers, an in-memory server) and run \`quell verify --command\`. See docs/dependencies.md.`, '');
   });
   out.push('If a survivor is an equivalent mutant (the change cannot alter behaviour), mark the line with `// quell-ignore-mutant <reason>` instead of contorting the test.');
   return `${out.join('\n')}\n`;

@@ -13,6 +13,7 @@ const QUERY_METHODS = new Set(['find', 'findOne', 'findOneAndUpdate', 'findOneAn
 const PROMISE_METHODS = new Set(['save', 'create', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany', 'insertOne', 'insertMany', 'findByIdAndUpdate', 'findOneAndUpdate', 'findByIdAndDelete', 'findOneAndDelete', 'replaceOne']);
 const LOOKUP_METHODS = new Set(['exists', 'findOne', 'countDocuments']);
 const FS_PATH_SINKS = /^(?:fs\.(?:promises\.)?(?:readFile|readFileSync|createReadStream|writeFile|writeFileSync|unlink|unlinkSync|readdir|readdirSync|rm|rmSync)|(?:res|response)\.(?:sendFile|download)|path\.(?:join|resolve))$/;
+const NETWORK_CALL = /^(?:fetch|axios|got|ky|(?:axios|got|ky|http|https)\.(?:get|post|put|patch|delete|request)|(?:axios|got|ky)\.(?:head|options))$/;
 const ARRAY_METHODS = new Set(['map', 'filter', 'forEach', 'reduce', 'find', 'some', 'every', 'flatMap']);
 const SCHEMA_CALLS = new Set(['parse', 'safeParse', 'parseAsync', 'safeParseAsync']);
 const PRIVILEGED_FIELD = /^(?:status|role|roles|isAdmin|isActive|permissions|plan|type)$/;
@@ -29,6 +30,11 @@ const SANITIZERS = {
 };
 const NUMERIC_NAME = /(?:hour|minute|second|count|index|idx|page|limit|offset|amount|total|qty|quantity|price|age|score|size|day|month|year)$/i;
 const NUMERIC_CALL = /^(?:Number|parseInt|parseFloat|Math\.\w+)$/;
+const QUERY_RETURNING = new Set(['find', 'findOne', 'findById', 'findByIdAndUpdate', 'findOneAndUpdate', 'findByIdAndDelete', 'findOneAndDelete', 'countDocuments', 'exists']);
+// Reading these members off a query/promise is harmless (chaining a query builder, then/catch); reading data fields is the bug.
+const QUERY_BUILDER = new Set(['then', 'catch', 'finally', 'exec', 'lean', 'populate', 'select', 'sort', 'limit', 'skip', 'where', 'session', 'collation', 'hint', 'maxTimeMS']);
+const ORM_MENTION = /mongoose|sequelize|prisma|typeorm|mongodb|knex|objection|bookshelf|drizzle|\.populate\(|\bmodels?\b/i;
+const SECRET_ARG_CALLS = /^(?:jwt\.sign|jwt\.verify|jsonwebtoken\.sign|jsonwebtoken\.verify|crypto\.createHmac|createHmac)$/;
 const SECRET_NAME = /(?:secret|passw(?:or)?d|api[_-]?key|private[_-]?key|access[_-]?token|auth[_-]?token)$/i;
 
 const BASE_RISK = { throws: 6, boundary: 4, schema: 5, jsdoc: 3, nullish: 3, async: 2 };
@@ -36,8 +42,17 @@ const RULE_RISK = {
   'mass-assignment': 10, 'regex-injection': 10, 'nosql-injection': 10, 'path-traversal': 10, 'eval-input': 10,
   'unguarded-call': 9, 'check-then-act': 9, 'hard-coded-secret': 9,
   'open-redirect': 8, 'missing-await': 8, 'unparsed-json': 7,
-  'unguarded-member-call': 6, 'unhandled-async-route': 5, 'falsy-fallback': 4,
+  'unguarded-network-call': 7, 'unguarded-member-call': 6, 'unhandled-async-route': 5, 'deep-response-chain': 5, 'falsy-fallback': 4,
 };
+
+// How much to trust a finding, from precision on the bundled benchmark (eval/) and on real code reviews.
+export const CONFIDENCE_RANK = { low: 0, medium: 1, high: 2 };
+const RULE_CONFIDENCE = {
+  'nosql-injection': 'high', 'path-traversal': 'high', 'eval-input': 'high', 'unparsed-json': 'high', 'hard-coded-secret': 'high', 'missing-await': 'high',
+  'mass-assignment': 'high', 'unguarded-call': 'high',
+  'regex-injection': 'medium', 'open-redirect': 'medium', 'unguarded-network-call': 'medium', 'deep-response-chain': 'medium', 'check-then-act': 'medium', 'unguarded-member-call': 'medium', 'unhandled-async-route': 'medium', 'falsy-fallback': 'medium',
+};
+const CATEGORY_CONFIDENCE = { throws: 'high', boundary: 'medium', schema: 'medium', jsdoc: 'medium', nullish: 'low', async: 'low' };
 
 const SUGGESTIONS = {
   throws: 'assert the error type and message',
@@ -63,6 +78,8 @@ export const RULES = {
   'hard-coded-secret': 'secret-looking value is committed in source; load it from the environment and test the missing-config path',
   'eval-input': 'dynamic code evaluation with a non-literal argument; remove it or test hostile input',
   'unparsed-json': 'JSON.parse on request data outside try/catch throws on malformed input; test invalid JSON',
+  'unguarded-network-call': 'network call can reject or hang and nothing handles it; test a rejected call, a non-2xx status and a timeout (stub the client)',
+  'deep-response-chain': 'deep or indexed read on a response crashes when the shape differs; test an empty or missing field and read it with optional chaining',
 };
 
 function rootName(node) {
@@ -144,7 +161,7 @@ export function scanSource(text, file, options = {}) {
   const ordinals = new Map();
   const seen = new Set();
   const ancestors = [];
-  const frames = [{ name: '<module>', node: ast.program, taint: new Map(), aliases: new Map() }];
+  const frames = [{ name: '<module>', node: ast.program, taint: new Map(), aliases: new Map(), safe: new Map() }];
   let suppressed = 0;
 
   const slice = (node, limit = 160) => {
@@ -154,7 +171,7 @@ export function scanSource(text, file, options = {}) {
 
   const ignored = (node, category, rule) => (directives.byLine.get(node.loc.start.line) ?? []).some((rules) => !rules.length || rules.includes(rule ?? category) || rules.includes(category));
 
-  const emit = (node, category, { rule = null, evidence = slice(node), suggestion, branch = false, risk } = {}) => {
+  const emit = (node, category, { rule = null, evidence = slice(node), suggestion, branch = false, risk, confidence } = {}) => {
     if (ignored(node, category, rule)) { suppressed += 1; return; }
     const frame = frames.at(-1);
     const key = [idFile, frame.name, category, rule ?? '', evidence].join('|');
@@ -165,7 +182,7 @@ export function scanSource(text, file, options = {}) {
       id: crypto.createHash('sha1').update(`${key}|${ordinal}`).digest('hex').slice(0, 12),
       file, line: node.loc.start.line, column: node.loc.start.column + 1, endLine: node.loc.end.line, endColumn: node.loc.end.column,
       ...(branch ? { branch } : {}),
-      function: frame.name, category, ...(rule ? { rule } : {}), evidence,
+      function: frame.name, category, ...(rule ? { rule } : {}), confidence: confidence ?? (rule ? RULE_CONFIDENCE[rule] : CATEGORY_CONFIDENCE[category]), evidence,
       suggestion: suggestion ?? (rule ? RULES[rule] : SUGGESTIONS[category]),
       risk: (risk ?? (rule ? RULE_RISK[rule] : BASE_RISK[category])) + (sensitive ? 1 : 0),
     });
@@ -179,6 +196,7 @@ export function scanSource(text, file, options = {}) {
   };
   const taintOf = lookupFrames('taint'); // { kind: 'body' | 'query' | 'params', whole: boolean } | null
   const aliasOf = lookupFrames('aliases');
+  const safeFor = lookupFrames('safe'); // name -> Set of sinks the value was already sanitised for
 
   /** The request member chain `req.<source>...` a node is (`{ kind, depth }`: properties after the source), or null. */
   const requestChain = (node) => {
@@ -254,6 +272,7 @@ export function scanSource(text, file, options = {}) {
       frame.taint.set(target.name, kind ? { kind, whole: wholeBody(value, true) } : null);
       const aliased = value?.type === 'MemberExpression' && RESPONSE_ROOT.test(rootName(value) ?? '') && chainDepth(value) >= 2 && !hasOptional(value);
       frame.aliases.set(target.name, aliased ? true : null);
+      frame.safe.set(target.name, sanitisedFor(value));
     } else if (target.type === 'ObjectPattern' || target.type === 'ArrayPattern') {
       const kind = taintKind(value);
       if (!kind) return;
@@ -266,6 +285,26 @@ export function scanSource(text, file, options = {}) {
       };
       visit(target);
     }
+  };
+
+  /** Sinks a value is already sanitised for: `escapeRegex(q)` or `String(q).replace(/[...]/g, '\$&')` is safe in a regex. */
+  const sanitisedFor = (value) => {
+    if (value?.type !== 'CallExpression') return null;
+    const callee = slice(value.callee, 80);
+    const escapesRegex = SANITIZERS.regex.test(callee)
+      || (propertyName(value.callee) === 'replace' && value.arguments[0]?.type === 'RegExpLiteral' && value.arguments[1]?.type === 'StringLiteral' && value.arguments[1].value.includes('$&'));
+    return escapesRegex ? new Set(['regex']) : null;
+  };
+  const regexSafe = (node) => (node.type === 'Identifier' && safeFor(node.name)?.has('regex')) || SANITIZERS.regex.test(slice(node, 80));
+
+  /** The redirect target was checked with `startsWith('/')` earlier in the same function. */
+  const checkedSameSite = (node) => {
+    const start = frames.at(-1).node.start;
+    const before = text.slice(start, node.start);
+    const target = slice(node, 80);
+    // The standard pair is needed: `startsWith('/')` alone accepts `//evil.example`.
+    const has = (prefix) => ["'", '"', '`'].some((quote) => before.includes(`${target}.startsWith(${quote}${prefix}${quote})`));
+    return has('/') && has('//');
   };
 
   /** A redirect target with a fixed single-slash prefix stays on this site (`'/users/' + id`); `//host` does not. */
@@ -297,8 +336,24 @@ export function scanSource(text, file, options = {}) {
     return false;
   };
 
-  const inTryOrWrapper = () => ancestors.slice(0, -1).some((n) => n.type === 'TryStatement'
-    || (n.type === 'CallExpression' && ASYNC_WRAPPERS.test(n.callee.name ?? propertyName(n.callee) ?? '')));
+  /** A network call is handled inside try/catch, a known async wrapper, or a promise chain that ends in `.catch`. */
+  const networkHandled = () => inTryOrWrapper() || ancestors.slice(0, -1).some((n) => n.type === 'CallExpression' && propertyName(n.callee) === 'catch');
+
+  /**
+   * Handled where it matters: inside the `try` block (not its `catch`/`finally`), or inside a function handed to an async
+   * wrapper. The walk stops at the first function boundary, so a callback created inside a `try` is not covered by it.
+   */
+  const inTryOrWrapper = () => {
+    for (let i = ancestors.length - 2; i >= 0; i -= 1) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'TryStatement' && ancestor.block === ancestors[i + 1]) return true;
+      if (FUNCTION_TYPES.has(ancestor.type)) {
+        const parent = ancestors[i - 1];
+        return parent?.type === 'CallExpression' && ASYNC_WRAPPERS.test(parent.callee.name ?? propertyName(parent.callee) ?? '');
+      }
+    }
+    return false;
+  };
 
   const onFunction = (node) => {
     const tags = jsdocTags(node.leadingComments ?? ancestors.at(-2)?.leadingComments ?? ancestors.at(-3)?.leadingComments);
@@ -315,7 +370,7 @@ export function scanSource(text, file, options = {}) {
     const others = comparisons.filter((c) => !nullChecks.includes(c));
     // `role === "ADMIN"`-style enum checks are the weakest boundary candidates.
     const enumOnly = others.length > 0 && others.every((c) => EQUALITY.has(c.operator) && (c.left.type === 'StringLiteral' || c.right.type === 'StringLiteral'));
-    if (others.length) emit(node.test, 'boundary', { branch: true, risk: enumOnly ? 2 : undefined });
+    if (others.length) emit(node.test, 'boundary', { branch: true, risk: enumOnly ? 2 : undefined, confidence: enumOnly ? 'low' : undefined });
     if (nullChecks.length) emit(node.test, 'nullish', { branch: true });
   };
 
@@ -350,9 +405,18 @@ export function scanSource(text, file, options = {}) {
       emit(node, 'risk', { rule: 'check-then-act' });
     }
 
+    if (NETWORK_CALL.test(calleeText) && !networkHandled(node)) {
+      const options = node.arguments.find((arg) => arg.type === 'ObjectExpression');
+      const hasLimit = options?.properties.some((prop) => ['signal', 'timeout'].includes(prop.key?.name));
+      emit(node, 'risk', { rule: 'unguarded-network-call', suggestion: `${RULES['unguarded-network-call']}${hasLimit ? '' : '; set a timeout or signal'}` });
+    }
+    if (SECRET_ARG_CALLS.test(calleeText)) {
+      const keyArg = node.arguments[1];
+      if (keyArg?.type === 'StringLiteral' && keyArg.value.length >= 8 && !/\s/.test(keyArg.value)) emit(node, 'risk', { rule: 'hard-coded-secret', evidence: `${calleeText}(…, "…")` });
+    }
     if (QUERY_METHODS.has(property) && first?.type === 'ObjectExpression' && taintedOperand(first)) emit(node, 'risk', { rule: 'nosql-injection' });
     if (FS_PATH_SINKS.test(calleeText) && node.arguments.some((arg) => taintKind(arg, 'path'))) emit(node, 'risk', { rule: 'path-traversal' });
-    if (/^(?:res|response)\.redirect$/.test(calleeText) && node.arguments.some((arg) => taintKind(arg) && !sameSiteTarget(arg))) emit(node, 'risk', { rule: 'open-redirect' });
+    if (/^(?:res|response)\.redirect$/.test(calleeText) && node.arguments.some((arg) => taintKind(arg) && !sameSiteTarget(arg) && !checkedSameSite(arg))) emit(node, 'risk', { rule: 'open-redirect' });
     if ((calleeText === 'eval' || calleeText === 'vm.runInNewContext' || calleeText === 'vm.runInThisContext') && first && first.type !== 'StringLiteral') emit(node, 'risk', { rule: 'eval-input' });
     if (calleeText === 'JSON.parse' && taintKind(first) && !inTryOrWrapper()) emit(node, 'risk', { rule: 'unparsed-json' });
     if (['match', 'search'].includes(property) && first && taintKind(first, 'regex') && first.type !== 'RegExpLiteral') emit(node, 'risk', { rule: 'regex-injection' });
@@ -361,7 +425,7 @@ export function scanSource(text, file, options = {}) {
   const onNew = (node) => {
     const name = node.callee.name;
     const [first] = node.arguments;
-    if (name === 'RegExp' && first && first.type !== 'StringLiteral' && !SANITIZERS.regex.test(slice(first, 80))) emit(node, 'risk', { rule: 'regex-injection' });
+    if (name === 'RegExp' && first && first.type !== 'StringLiteral' && !regexSafe(first)) emit(node, 'risk', { rule: 'regex-injection' });
     if (name === 'Function' && first && first.type !== 'StringLiteral') emit(node, 'risk', { rule: 'eval-input' });
     if (name === 'URL' && first && taintKind(first) && !sameSiteTarget(first)) emit(node, 'risk', { rule: 'open-redirect' });
     if (/^[A-Z]/.test(name ?? '') && node.arguments.some((arg) => wholeBody(arg))) emit(node, 'risk', { rule: 'mass-assignment' });
@@ -389,6 +453,39 @@ export function scanSource(text, file, options = {}) {
     emit(node, 'risk', { rule: 'hard-coded-secret', evidence: `${name} = "…"` });
   };
 
+  // `ctx.save()` is not a database write: require a Model-like receiver (`User.create`) or a module that uses an ORM/ODM.
+  const mentionsOrm = ORM_MENTION.test(text);
+  const looksLikeOrmCall = (callee) => mentionsOrm || /^[A-Z]/.test(rootName(callee.object) ?? '');
+
+  /** `const user = User.findById(id); return user.name;` in an async function: the field is read off a promise. */
+  const isUnawaitedQueryRead = (declarator) => {
+    const frame = frames.at(-1);
+    const { init, id } = declarator;
+    if (!frame.node.async || id.type !== 'Identifier' || init?.type !== 'CallExpression' || init.callee.type !== 'MemberExpression') return false;
+    if (!QUERY_RETURNING.has(propertyName(init.callee)) || init.callee.object.type === 'CallExpression' || !looksLikeOrmCall(init.callee)) return false;
+    if (FUNCTION_TYPES.has(init.arguments[0]?.type)) return false; // Array.prototype.find(predicate)
+    const name = id.name;
+    const awaited = someShallow(frame.node.body, (n) => n.type === 'AwaitExpression' && n.argument.type === 'Identifier' && n.argument.name === name);
+    const readsField = someShallow(frame.node.body, (n) => n.type === 'MemberExpression' && n.object.type === 'Identifier' && n.object.name === name && !QUERY_BUILDER.has(propertyName(n)));
+    return !awaited && readsField;
+  };
+
+  /** `res.data.items[0].plan`: the outermost non-optional read with an index or four levels on a response-like value. */
+  const isDeepResponseRead = (node) => {
+    const parent = ancestors.at(-2);
+    if ((parent?.type === 'MemberExpression' && parent.object === node) || (parent?.type === 'AssignmentExpression' && parent.left === node)) return false;
+    if (hasOptional(node) || parent?.type === 'UnaryExpression') return false;
+    let depth = 0;
+    let indexed = false;
+    let current = node;
+    while (current.type === 'MemberExpression') {
+      depth += 1;
+      if (current.computed && current.property.type === 'NumericLiteral') indexed = true;
+      current = current.object;
+    }
+    return current.type === 'Identifier' && /^(?:res|resp|response|r|result|payload|json)$/i.test(current.name) && ((indexed ? depth >= 3 : depth >= 4));
+  };
+
   const onVisit = (node) => {
     if (node.type === 'ThrowStatement' && node.argument?.type === 'NewExpression') {
       const callee = node.argument.callee;
@@ -404,11 +501,12 @@ export function scanSource(text, file, options = {}) {
     if (node.type === 'NewExpression') onNew(node);
 
     if (node.type === 'ObjectProperty' && (node.key.name === '$regex' || node.key.value === '$regex')
-      && !['StringLiteral', 'RegExpLiteral'].includes(node.value.type) && !SANITIZERS.regex.test(slice(node.value, 80))) {
+      && !['StringLiteral', 'RegExpLiteral'].includes(node.value.type) && !regexSafe(node.value)) {
       emit(node, 'risk', { rule: 'regex-injection' });
     }
     if (node.type === 'VariableDeclarator') {
       bind(node.id, node.init);
+      if (isUnawaitedQueryRead(node)) emit(node.init, 'risk', { rule: 'missing-await' });
       if (node.id.type === 'Identifier') onSecret(node.id.name, node.init, node);
     }
     if (node.type === 'ObjectProperty' && !node.computed) onSecret(node.key.name ?? node.key.value, node.value, node);
@@ -418,17 +516,18 @@ export function scanSource(text, file, options = {}) {
       if (node.left.type === 'MemberExpression') onSecret(propertyName(node.left), node.right, node);
     }
     if (node.type === 'ExpressionStatement' && node.expression.type === 'CallExpression' && frames.at(-1).node.async
-      && node.expression.callee.type === 'MemberExpression' && PROMISE_METHODS.has(propertyName(node.expression.callee))) {
+      && node.expression.callee.type === 'MemberExpression' && PROMISE_METHODS.has(propertyName(node.expression.callee)) && looksLikeOrmCall(node.expression.callee)) {
       emit(node.expression, 'risk', { rule: 'missing-await' });
     }
     if (node.type === 'LogicalExpression' && node.operator === '||') onFallback(node);
+    if (node.type === 'MemberExpression' && isDeepResponseRead(node)) emit(node, 'risk', { rule: 'deep-response-chain' });
   };
 
   const traverse = (node, parent) => {
     ancestors.push(node);
     const isFunction = FUNCTION_TYPES.has(node.type);
     if (isFunction) {
-      const frame = { name: functionName(node, parent, frames.at(-1).name), node, taint: new Map(), aliases: new Map() };
+      const frame = { name: functionName(node, parent, frames.at(-1).name), node, taint: new Map(), aliases: new Map(), safe: new Map() };
       // Parameters shadow outer tainted names: `[1].forEach((id) => fs.readFile(id))` is not the request `id`.
       for (const name of patternNames(node.params)) {
         frame.taint.set(name, null);

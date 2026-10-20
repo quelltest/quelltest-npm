@@ -25,7 +25,7 @@ const SHOULD_FLAG = [
   ['nosql via destructure', 'nosql-injection', route('  const { email } = req.body;\n  return User.findOne({ email });')],
   ['path traversal readFile', 'path-traversal', "function f(req) { return fs.readFileSync('/data/' + req.query.name); }"],
   ['path traversal sendFile', 'path-traversal', 'function f(req, res) { res.sendFile(path.join(base, req.params.file)); }'],
-  ['missing await', 'missing-await', 'async function f(doc) {\n  doc.save();\n  return doc;\n}'],
+  ['missing await', 'missing-await', "import mongoose from 'mongoose';\nasync function f(doc) {\n  doc.save();\n  return doc;\n}"],
   ['hard-coded secret', 'hard-coded-secret', "const jwtSecret = 'super-secret-value-123';"],
   ['hard-coded secret property', 'hard-coded-secret', "const config = { apiKey: 'abcd1234efgh5678' };"],
   ['eval of input', 'eval-input', 'function f(code) { return eval(code); }'],

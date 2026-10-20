@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 
-export const COMMANDS = ['find', 'score', 'generate', 'verify', 'gate', 'mcp'];
+export const COMMANDS = ['find', 'score', 'generate', 'verify', 'gate', 'mcp', 'eval', 'mocks'];
 
 const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify', 'include-covered', 'in-place', 'findings', 'strict']);
-const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm', 'min-score', 'handoff']);
-const REPEATABLE = new Set(['include', 'exclude', 'function']);
+const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm', 'min-score', 'handoff', 'min-confidence', 'command', 'timeout', 'examples']);
+const REPEATABLE = new Set(['include', 'exclude', 'function', 'infra-exit']);
 const ALIASES = { ignore: 'exclude', h: 'help', v: 'version' };
 
 export class UsageError extends Error {}
@@ -17,7 +17,7 @@ function integer(name, value, { min = 0 } = {}) {
 
 /** Parse argv (without node and script). Accepts `--opt value` and `--opt=value`; throws UsageError. */
 export function parseArgs(argv) {
-  const options = { include: [], exclude: [], function: [] };
+  const options = { include: [], exclude: [], function: [], 'infra-exit': [] };
   const positionals = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -37,6 +37,9 @@ export function parseArgs(argv) {
   }
   if (options.threshold !== undefined) options.threshold = integer('threshold', options.threshold);
   if (options.top !== undefined) options.top = integer('top', options.top, { min: 1 });
+  options['infra-exit'] = options['infra-exit'].map((code) => integer('infra-exit', code));
+  if (options.timeout !== undefined) options.timeout = integer('timeout', options.timeout, { min: 1 });
+  if (options['min-confidence'] !== undefined && !['low', 'medium', 'high'].includes(options['min-confidence'])) throw new UsageError('--min-confidence expects low, medium or high');
   if (options['min-score'] !== undefined) {
     options['min-score'] = integer('min-score', options['min-score']);
     if (options['min-score'] > 100) throw new UsageError('--min-score expects 0-100');
