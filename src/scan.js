@@ -12,6 +12,7 @@ const SENSITIVE = /auth|login|token|password|payment|pay|billing|charge|refund|d
 const WRITE_METHODS = new Set(['create', 'update', 'updateOne', 'updateMany', 'findByIdAndUpdate', 'findOneAndUpdate', 'set', 'merge', 'insertOne']);
 const ARRAY_METHODS = new Set(['map', 'filter', 'forEach', 'reduce', 'find', 'some', 'every', 'flatMap']);
 const SCHEMA_CALLS = new Set(['parse', 'safeParse', 'parseAsync', 'safeParseAsync']);
+const PRIVILEGED_FIELD = /^(?:status|role|roles|isAdmin|isActive|permissions|plan|type)$/;
 const RESPONSE_ROOT = /^(data|res|resp|response|result|results|payload|body|json|req)$/i;
 
 const SUGGESTIONS = {
@@ -172,6 +173,10 @@ export function scanSource(text, file, options = {}) {
     if (node.type === 'ObjectProperty' && (node.key.name === '$regex' || node.key.value === '$regex')
       && !['StringLiteral', 'RegExpLiteral'].includes(node.value.type) && !/escape/i.test(slice(node.value, 80))) {
       emit(node, 'risk', { rule: 'regex-injection' });
+    }
+    if (node.type === 'AssignmentExpression' && node.operator === '=' && node.left.type === 'MemberExpression' && PRIVILEGED_FIELD.test(propertyName(node.left) ?? '')
+      && /^req\.body(?:\.\w+)*$/.test(slice(node.right, 80))) {
+      emit(node, 'risk', { rule: 'mass-assignment' });
     }
     if (node.type === 'LogicalExpression' && node.operator === '||') {
       const numeric = node.right.type === 'NumericLiteral' && node.left.type !== 'LogicalExpression';
