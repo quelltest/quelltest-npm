@@ -128,7 +128,8 @@ function nearestNodeModules(root) {
 
 /** Copy `root` (without node_modules/.git/build output) to a temp dir and link node_modules. Throws if the copy is too large. */
 function createMirror(root) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'quell-verify-'));
+  // Use the real path: jest and vitest crawl the project root and mis-handle symlinked (/var -> /private/var) or 8.3 short (RUNNER~1) temp paths.
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'quell-verify-')));
   let files = 0;
   let bytes = 0;
   const cleanup = () => {
