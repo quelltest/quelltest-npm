@@ -64,7 +64,7 @@ The release agent does the rest. Add the repository secret `NPM_TOKEN` (a granul
 gh api -X PUT repos/quelltest/quelltest-npm/branches/main/protection --input .github/branch-protection.json
 ```
 
-What it sets: no force-pushes, no deletion of `main`, changes must come through a pull request (zero approvals required, so a solo maintainer can still merge), and the Linux Node 20/22/24, Windows and Python checks must pass. Admins are not forced to follow the rules, so a hotfix is still possible.
+What it sets: no force-pushes, no deletion of `main`, changes must come through a pull request (zero approvals required, so a solo maintainer can still merge), and the Linux Node 22/24, Windows and Python checks must pass. Admins are not forced to follow the rules, so a hotfix is still possible.
 
 It deliberately does **not** require the macOS job (GitHub-hosted macOS runners were short on capacity when this was written; a required job that never starts blocks every merge) or the PR guard (add `guard` to `contexts` once the guard workflow is on `main`). Add them to `required_status_checks.contexts` when you want them enforced. If you rename a CI job, update the names here: a required check that no longer exists blocks merging.
 

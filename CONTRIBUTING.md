@@ -15,7 +15,7 @@ Search existing issues first. Use a conventional-commit title for new issues, fo
 
 ## Development setup
 
-You need Node.js 20 or newer.
+You need Node.js 22.18 or newer (22.18+ or 24.11+), the range `@babel/parser` 8 supports.
 
 ```bash
 git clone https://github.com/quelltest/quelltest-npm.git

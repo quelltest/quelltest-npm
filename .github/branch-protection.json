@@ -2,7 +2,6 @@
   "required_status_checks": {
     "strict": false,
     "contexts": [
-      "test (node 20, ubuntu-latest)",
       "test (node 22, ubuntu-latest)",
       "test (node 24, ubuntu-latest)",
       "test (node 22, windows-latest)",

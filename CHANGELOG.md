@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking:** requires Node.js 22.18+ or 24.11+ (`engines.node` is `^22.18.0 || >=24.11.0`). Node 20 and earlier 22.x are no longer supported: the parser dependency moved to `@babel/parser` 8, which declares that range. A test keeps `engines.node` equal to the parser's.
+- CI runs on Node 22 and 24 (Linux), plus Windows and macOS on Node 22.
+- Dev tooling: jest 30, mocha 12, vitest 5 (clears the open Dependabot alerts except a no-patch `sprintf-js` advisory in jest's dev-only config loader).
+
 ## 0.3.1
 
 Fixes from the 0.3.0 effectiveness report, and a research-backed answer to code that depends on API calls and services (see `docs/dependencies.md`).
