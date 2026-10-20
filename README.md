@@ -1,21 +1,56 @@
 # Quelltest for npm
 
-Offline-first edge-case discovery for JavaScript and TypeScript projects. Quelltest complements Vitest, Jest, and Node's test runner: it finds contracts already present in source code and turns them into reviewable test candidates.
+Offline-first edge-case discovery for JavaScript and TypeScript. Quelltest reads your source with a real parser (it never executes it), lists the guards, errors and risky patterns that deserve a test, tells you which of them your existing tests already run, and can generate tests that are checked against mutants of your own code before they are kept.
+
+It complements Jest, Vitest, Mocha and `node:test`; it is not a replacement for a test runner.
 
 ## Quick start
 
 ```bash
 npm install
-npx quell find src/
-npx quell score src/ --threshold 60
-npx quell find src/ --json
+npx quell find src/                      # ranked candidates, top 10
+npx quell find src/ --diff origin/main   # only lines changed in this branch
+npx quell score src/ --coverage coverage/coverage-final.json --threshold 60
+npx quell generate src/ --write --verify # real tests, verified against source mutants
 ```
 
-The 0.1 MVP is deterministic and never executes project source during scanning. It reports guard boundaries, thrown errors, nullish paths, JSDoc contracts, schema hints, and async paths with stable IDs and source locations.
+## What it does
 
-## Product boundary
+| Command | Behaviour |
+| --- | --- |
+| `find [PATH]` | Parses files (directory or single file) and reports candidates per function: thrown errors, boundary conditions (including conditions that call functions), nullish paths, JSDoc contracts, schema calls, async functions, and a rule pack for defects that *lack* a guard (regex built from user input, `Object.assign(doc, req.body)`, `\|\|` that swallows `0`, unguarded `jwt.verify`/`bcrypt.compare`, check-then-create races, async routes without error mapping, unguarded `data.items.map`). |
+| `score [PATH]` | Share of candidates your tests actually execute, from Istanbul `coverage-final.json` or `lcov.info` (auto-detected in `./coverage`). A boundary counts only when both branches ran. **Without coverage evidence it prints `not scored`**, never `0/100`. |
+| `generate [PATH]` | Writes tests that import the unit, call it with boundary values and assert; JSDoc `@example fn(1) // => 2` lines become assertions. Anything it cannot reason about becomes a `.todo.md` note. |
+| `verify TEST --source FILE` | Runs a test on the original source, then on mutants of that source (flipped operators, removed guards and throws); the test must fail on at least one. |
 
-This package is an analyzer and verification layer, not a replacement for a test runner, property-testing framework, or API contract broker. The implementation plan and market research are in [`research/`](research/), mapped to issues 1–5 in the upstream repository.
+Test files, config, generated output and anything in `.quellignore` are skipped; use `--include`, `--exclude`/`--ignore` and `--include-tests` to adjust. Findings are ranked by risk; `--all` and `--top N` control the list. `--json` prints the full report, `--sarif` prints SARIF 2.1.0 for GitHub code scanning.
+
+Finding IDs hash the function name and the normalised evidence, not the line number, so they survive unrelated edits.
+
+### Generated tests
+
+`generate` detects the runner (Vitest, Jest/react-scripts, Mocha, else `node:test`) and module system (ESM/CommonJS) and writes matching files into `tests/quelltest/` (change with `--destination`, override with `--runner`). Statuses:
+
+- `GENERATED` — a real test, not run yet.
+- `VERIFIED` — passed on the original code and failed on a source mutant (`--verify`).
+- `TODO` — no test could be derived; a note is written instead. A note is not a test.
+- `FLAGGED` — rejected by the security gate (which inspects the generated code, not quoted evidence) or as a duplicate.
+
+Only simple guards (parameters compared with literals, `typeof`, truthiness, joined by `||`) are turned into tests today. `--llm MODULE` lets you plug in your own model for the rest: the module's default export receives the finding and the function source and returns test code, which must pass the same gates. quelltest itself never sends code anywhere.
+
+### Exit codes
+
+`0` ok · `1` score below `--threshold` (or `verify` did not verify) · `2` usage or runtime error · `3` `--threshold` given but there is no score (no coverage evidence).
+
+## Limitations
+
+- Findings are review hints, not proof of defects. Line-level rules cannot see logic errors such as wrong business rules (see `eval/defects.json` for the known misses).
+- Statement coverage is matched to candidates by position; `lcov.info` is line-granular.
+- Mutation verification runs your tests once per mutant (up to 30 per test), so `--verify` is slower than a plain scan.
+
+## Measuring quelltest itself
+
+`npm run eval` scans `eval/defects/` (known defects from a real code base) and `eval/clean/` (guarded code) and prints recall and false positives; the test suite fails if recall drops below 50% or the clean files produce risk findings.
 
 ## Development
 
@@ -26,6 +61,6 @@ npm run pack:check
 npm run test:ci
 ```
 
-The CI workflow runs Node checks on Node 20, 22 and 24 (plus Windows and macOS on Node 22), and the PR report workflow runs quelltest on every pull request and posts the result to the job summary and a PR comment. Ruff and Flake8 are conditional quality jobs: they run only when Python files are added, so the npm package does not pull in unrelated Python tooling while mixed-language contributions remain covered.
+CI runs on Node 20, 22 and 24 (plus Windows and macOS on Node 22). A PR workflow runs quelltest on every pull request, limited to changed lines, and publishes the report to the job summary and a PR comment. Ruff and Flake8 are conditional jobs that only run when Python files are added.
 
-MIT licensed. Maintained by Shashank Bindal.
+Licensed under the [Apache License 2.0](LICENSE). Maintained by Shashank Bindal.
