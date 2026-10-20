@@ -42,6 +42,20 @@ function literalsIn(node) {
   return out;
 }
 
+/** Names of the functions an assertion calls (`add` in `expect(add(1, 2)).toBe(3)`), excluding the assertion API itself. */
+function subjectsIn(assertion) {
+  const names = new Set();
+  const visit = (node) => {
+    if (node !== assertion && node.type === 'CallExpression') {
+      const name = node.callee.type === 'Identifier' ? node.callee.name : propertyName(node.callee);
+      if (name && !ASSERT_ROOTS.has(name) && !NODE_ASSERT_METHODS.has(name) && !NOT_EXPECT_MATCHERS.has(name)) names.add(name);
+    }
+    for (const child of childNodes(node)) visit(child);
+  };
+  visit(assertion);
+  return [...names];
+}
+
 function strengthOf(callNode) {
   const root = rootOf(callNode.callee);
   const chain = methodChain(callNode.callee);
@@ -97,7 +111,7 @@ export function analyzeTests(text, file = 'a.test.js') {
             const innerChain = methodChain(current.callee);
             if (isAssertionCall(inner, innerChain, current.callee)) {
               // outermost call of a chain only: skip the inner `expect(x)` call itself
-              assertions.push({ method: innerChain.at(-1) ?? inner, strength: strengthOf(current), literals: literalsIn(current), line: current.loc.start.line });
+              assertions.push({ method: innerChain.at(-1) ?? inner, strength: strengthOf(current), literals: literalsIn(current), subjects: subjectsIn(current), line: current.loc.start.line });
               return;
             }
           }
@@ -121,6 +135,12 @@ export function analyzeTests(text, file = 'a.test.js') {
   visit(ast.program, [], false);
   return tests;
 }
+
+const subjectsOf = (test) => new Set(test.assertions.flatMap((item) => item.subjects ?? []));
+const sharesSubject = (a, b) => {
+  const left = subjectsOf(a);
+  return left.size > 0 && [...subjectsOf(b)].some((name) => left.has(name));
+};
 
 const signature = (test) => test.assertions.map((item) => `${item.method}:${JSON.stringify(item.literals)}`).join('|');
 
@@ -151,11 +171,21 @@ export function compareTests(baseText, headText, file) {
     else {
       // A renamed test keeps its assertions; pair by signature before calling it deleted.
       const renamed = [...unmatchedHead].find(([, candidate]) => signature(candidate) === signature(test));
+      const replacement = renamed ? null : [...unmatchedHead].find(([, candidate]) => sharesSubject(test, candidate));
       if (renamed) {
         unmatchedHead.delete(renamed[0]);
         pairs.push([name, test, renamed[1]]);
+      } else if (replacement) {
+        // Deleted and re-written under another name over the same subject: compare strength, and show the pairing.
+        unmatchedHead.delete(replacement[0]);
+        pairs.push([name, test, replacement[1]]);
+        issues.push({ file, test: name, kind: 'test-replaced', severity: 'review', line: replacement[1].line, message: `test deleted and replaced by "${replacement[0]}" (same subject: ${[...subjectsOf(test)].filter((s) => subjectsOf(replacement[1]).has(s)).join(', ')})` });
       } else if (test.assertions.length || test.skipped === false) issues.push({ file, test: name, kind: 'test-deleted', severity: 'error', line: 1, message: 'test deleted' });
     }
+  }
+  // A newly added `.only` has no base test to pair with, but it stops the rest of the file from running.
+  for (const [name, added] of unmatchedHead) {
+    if (added.only && !added.allowed) issues.push({ file, test: name, kind: 'test-only', severity: 'error', line: added.line, message: 'added test uses `.only`, which silently skips every other test in the file' });
   }
   for (const [name, before, after] of pairs) {
     if (after.allowed) continue;
