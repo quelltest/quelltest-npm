@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.1
+
+Fixes from the 0.3.0 effectiveness report, and a research-backed answer to code that depends on API calls and services (see `docs/dependencies.md`).
+
+### Added
+- `generate`: property guards (`typeof body.lat !== "number"`, `!branch.geofences?.length`) become tests with a composed argument.
+- `generate`: path-condition stub synthesis for injected dependencies (parameters, their methods, global `fetch`): the guards on a call's result define the conditions, a small solver picks the values, and the first guard to fire decides the expected outcome. Stubs are labelled as derived from guards, not from the real service. A stubbed `globalThis.fetch` is always restored.
+- Rules `unguarded-network-call` and `deep-response-chain`; inline literal secrets in `jwt.sign`/`createHmac`; the plain missing-`await` form.
+- `verify`: survivors on mocked code carry `mockBoundary` and an explanation in the handoff; `--command` runs your own integration command (Testcontainers, in-memory server) against every mutant; `--timeout`; mutants capped per kind (`maxPerKind`, default 8).
+- `quell mocks --examples FILE`: checks stubs annotated `// quell-mock GET /path` against recorded examples (HAR, JSON map, OpenAPI JSON).
+- `quell eval` and the `eval/` fixtures ship in the package; findings carry `confidence` and `--min-confidence` filters them.
+
+### Fixed
+- `module.exports.name = fn`, `exports.name`, bracket form and `Object.assign(module.exports, ...)` are recognised as exports.
+- Route request cases see through `asyncHandler(...)`, `catchAsync(...)`, `wrap(...)`, middleware chains and curried wrappers.
+- `gate` reports a newly added `.only` and shows a deleted-and-rewritten test as a replacement.
+- A sanitiser applied through a variable (`const p = escapeRegex(q)`) no longer triggers `regex-injection`; a redirect checked with `startsWith('/')` is not an open redirect.
+- From the independent review of this release: generation for `if (!body) ...; if (body.lat > 90) ...` composes an object root instead of `true`; the security gate allows `globalThis.fetch` only as an assignment target or as `const originalFetch = globalThis.fetch` (never called or aliased); prototype-walking member names (`__proto__`, `constructor`, `prototype`) are rejected so the process cannot be polluted; guards nested in else-branches, loops or other conditions, tests of reassigned parameters and functions that call the network without a stubbable result are refused with a reason; a stubbed parameter that is also guarded keeps its guard cases; duplicate local result names are ambiguous; an imported or local `fetch` is not the global one; `--command` passes the test path in an environment variable (no shell interpolation) and `--infra-exit` marks environment-failure exit codes; `missing-await` needs a Model-like receiver or an ORM in the module and ignores `Array.find`; a redirect needs both `startsWith('/')` and `startsWith('//')` checks; only a `try` block (not `catch`/`finally` or detached callbacks) guards a call; gate pairing does renames first and ignores generic names; computed export keys are skipped; `quell mocks` escapes routes, avoids backtracking and survives malformed example files.
+- A verification mirror that cannot be deleted (a child process still holds it after a timeout) no longer fails the run.
+
 ## 0.3.0
 
 Repositioned as the free, offline gate for AI-written tests (see `docs/agents.md`).

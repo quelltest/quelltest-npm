@@ -38,7 +38,8 @@ const inRanges = (line, ranges) => ranges.some((range) => (Array.isArray(range) 
  * (`??` -> `||`, numeric `||` -> `??`), `guard` (`if (c)` -> `if (false)`), `throw` (removed) and `operator` flips.
  *
  * Options: `functions` limits mutation to named functions; `lines` (numbers or `[from, to]` ranges) limits it to
- * those source lines (e.g. scan findings); `max` caps the count after risk-aimed kinds are ordered first.
+ * those source lines (e.g. scan findings); `max` caps the count after risk-aimed kinds are ordered first, and
+ * `maxPerKind` (default 8) caps each kind so that no single kind uses the whole budget.
  * A line marked `// quell-ignore-mutant [reason]` (or the line after such a comment) is never mutated.
  * Returns `{ list, ignored }`.
  */
@@ -93,7 +94,18 @@ export function mutantsWithStats(text, file, options = {}) {
   // A mutant that does not parse would make any runner fail and be miscounted as a kill (`a && b || 0` -> `a && b ?? 0`).
   const unique = [...new Map(out.map((m) => [m.id, m])).values()].filter((m) => parseSource(applyMutant(text, m), file));
   unique.sort((a, b) => a.priority - b.priority || a.start - b.start);
-  return { list: unique.slice(0, options.max ?? 30), ignored };
+  // Cap each kind so a route file is not 30 `await removed` mutants: the budget flows on to guards, boundaries and `??`.
+  const maxPerKind = options.maxPerKind ?? 8;
+  const counts = new Map();
+  const list = [];
+  for (const mutant of unique) {
+    const used = counts.get(mutant.kind) ?? 0;
+    if (used >= maxPerKind) continue;
+    counts.set(mutant.kind, used + 1);
+    list.push(mutant);
+    if (list.length >= (options.max ?? 30)) break;
+  }
+  return { list, ignored };
 }
 
 /** Mutants only (see `mutantsWithStats`). */

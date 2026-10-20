@@ -77,12 +77,25 @@ export function renderTest({ runner, style, importPath, exportInfo, functionName
   const blocks = cases.map((item) => {
     const call = `${callee}(${item.args.join(', ')})`;
     const flagged = { ...item, async: isAsync };
-    const body = assertion(runner, flagged, call);
+    const checked = assertion(runner, flagged, call);
+    // A stubbed global fetch is always restored, even when the assertion throws.
+    const body = item.globalFetch
+      ? `const originalFetch = globalThis.fetch;
+  globalThis.fetch = ${item.globalFetch};
+  try {
+    ${checked}
+  } finally {
+    globalThis.fetch = originalFetch;
+  }`
+      : checked;
     const asyncKeyword = isAsync ? 'async ' : '';
     if (runner === 'node') return `test(${quote(`${functionName}: ${item.title}`)}, ${asyncKeyword}() => {\n  ${body}\n});`;
     return `  it(${quote(item.title)}, ${asyncKeyword}() => {\n    ${body}\n  });`;
   });
-  const parts = [header({ runner, style }), importLines({ runner, style, importPath, exportInfo })].filter(Boolean);
+  const stubNote = cases.some((item) => item.stubbed)
+    ? '// Stubs below are derived from the guards in the source, not from the real service. Compare them with recorded examples: quell mocks.'
+    : '';
+  const parts = [header({ runner, style }), importLines({ runner, style, importPath, exportInfo }), stubNote].filter(Boolean);
   const tests = runner === 'node' ? blocks.join('\n\n') : `describe(${quote(functionName)}, () => {\n${blocks.join('\n\n')}\n});`;
   return `${parts.join('\n')}\n\n${tests}\n`;
 }

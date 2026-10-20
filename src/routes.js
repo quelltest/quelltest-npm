@@ -19,6 +19,23 @@ const contains = (node, finding) => {
   return after && before;
 };
 
+/**
+ * The function literal that contains the finding inside a route argument: the argument itself, or one wrapped in
+ * `asyncHandler(fn)`, `catchAsync(fn)`, `wrap(fn)`, `validate(schema)(fn)` and similar call chains.
+ */
+function handlerIn(argument, finding, depth = 0) {
+  if (depth > 4 || !argument) return null;
+  if (FUNCTION_TYPES.has(argument.type)) return contains(argument, finding) ? argument : null;
+  if (argument.type === 'CallExpression') {
+    for (const inner of [...argument.arguments].reverse()) {
+      const found = handlerIn(inner, finding, depth + 1);
+      if (found) return found;
+    }
+    return handlerIn(argument.callee, finding, depth + 1);
+  }
+  return null;
+}
+
 /** Find the `router.METHOD(path, ..., handler)` registration whose handler contains the finding, if any. */
 export function routeFor(ast, finding) {
   let best = null;
@@ -26,7 +43,7 @@ export function routeFor(ast, finding) {
     if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression') continue;
     const method = propertyName(node.callee);
     if (!ROUTE_METHODS.has(method) || !/^(?:router|app|r|route)$/i.test(node.callee.object?.name ?? '')) continue;
-    const handler = [...node.arguments].reverse().find((arg) => FUNCTION_TYPES.has(arg.type) && contains(arg, finding));
+    const handler = [...node.arguments].reverse().map((arg) => handlerIn(arg, finding)).find(Boolean);
     if (!handler) continue;
     const first = node.arguments[0];
     const candidate = { method: method.toUpperCase(), path: first?.type === 'StringLiteral' ? first.value : '*', handler };

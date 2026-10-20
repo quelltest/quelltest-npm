@@ -1,13 +1,14 @@
 import path from 'node:path';
 import { generate, generateWithLlm } from './generator.js';
 import { verifyGenerated } from './verification.js';
-import { scan } from './scan.js';
+import { scan, CONFIDENCE_RANK } from './scan.js';
 import { score } from './score.js';
 import { attachCoverage, detectCoverage, loadCoverage } from './coverage.js';
 import { changedLines, filterToDiff } from './diff.js';
 import { toSarif } from './sarif.js';
 import { gate, gateSarif } from './gate.js';
 import { renderHandoff } from './handoff.js';
+import { checkStubs, loadExamples } from './contract.js';
 
 /**
  * Scan `root` and score it. Coverage evidence comes from `options.coverage` (a file path), or is
@@ -24,8 +25,9 @@ export function report(root = '.', options = {}) {
     evidence = { kind: coverage.kind, source: path.relative(process.cwd(), file).replaceAll('\\', '/') };
   }
   if (options.diff) result.findings = filterToDiff(result.findings, changedLines(options.diff));
+  if (options.minConfidence) result.findings = result.findings.filter((item) => CONFIDENCE_RANK[item.confidence] >= CONFIDENCE_RANK[options.minConfidence]);
   result.summary = score(result, evidence);
   return result;
 }
 
-export { scan, score, generate, generateWithLlm, verifyGenerated, toSarif, gate, gateSarif, renderHandoff };
+export { scan, score, generate, generateWithLlm, verifyGenerated, toSarif, gate, gateSarif, renderHandoff, checkStubs, loadExamples };

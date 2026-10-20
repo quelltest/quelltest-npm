@@ -12,9 +12,9 @@ const ALLOWED_MODULES = new Set(['node:test', 'node:assert', 'node:assert/strict
 // network, the file system or code evaluation is rejected, including through aliases (`const p = process`).
 const FORBIDDEN_IDENTIFIERS = new Set(['process', 'globalThis', 'global', 'module', 'eval', 'Function', 'fetch', 'XMLHttpRequest', 'WebSocket', 'Deno', 'Bun']);
 
-function* walk(node, parent = null) {
-  yield [node, parent];
-  for (const child of childNodes(node)) yield* walk(child, node);
+function* walk(node, parent = null, grandparent = null) {
+  yield [node, parent, grandparent];
+  for (const child of childNodes(node)) yield* walk(child, node, parent);
 }
 
 const moduleAllowed = (specifier) => specifier.startsWith('.') || ALLOWED_MODULES.has(specifier);
@@ -28,10 +28,11 @@ export function securityGate(source, file = 'generated.test.js') {
   const ast = parseSource(source, file);
   if (!ast) return { passed: false, reason: 'generated source does not parse' };
   const fail = (reason) => ({ passed: false, reason });
-  for (const [node, parent] of walk(ast.program)) {
+  for (const [node, parent, grandparent] of walk(ast.program)) {
     if (node.type === 'ImportDeclaration' || ((node.type === 'ExportNamedDeclaration' || node.type === 'ExportAllDeclaration') && node.source)) {
       if (!moduleAllowed(node.source.value)) return fail(`generated source imports ${node.source.value}`);
     }
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'originalFetch') return fail('generated source calls the saved original fetch');
     if (node.type === 'CallExpression' || node.type === 'NewExpression') {
       if (node.callee.type === 'Import') return fail('generated source uses dynamic import');
       if (node.callee.type === 'Identifier' && node.callee.name === 'require') {
@@ -40,7 +41,13 @@ export function securityGate(source, file = 'generated.test.js') {
       }
     }
     if (node.type === 'Identifier' && FORBIDDEN_IDENTIFIERS.has(node.name)) {
-      const isPropertyName = (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed)
+      // The only allowed uses of globalThis (generated fetch stubs): assigning `globalThis.fetch = <stub>`, and saving the
+      // original as `const originalFetch = globalThis.fetch`. Calling it, aliasing it or reading anything off it is not.
+      const onFetch = node.name === 'globalThis' && parent?.type === 'MemberExpression' && parent.object === node && !parent.computed && parent.property.name === 'fetch';
+      const assigned = grandparent?.type === 'AssignmentExpression' && grandparent.left === parent;
+      const saved = grandparent?.type === 'VariableDeclarator' && grandparent.init === parent && grandparent.id.name === 'originalFetch';
+      const fetchStub = onFetch && (assigned || saved);
+      const isPropertyName = fetchStub || (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed)
         || (parent?.type === 'ObjectProperty' && parent.key === node && !parent.computed && !parent.shorthand);
       if (!isPropertyName) return fail(`generated source references ${node.name}`);
     }
@@ -96,7 +103,7 @@ function plan(finding, cwd, cache) {
   }
   const exportInfo = exportOf(module, name);
   if (!exportInfo) return { reason: `\`${name}\` is not exported: add \`export\` (or add it to module.exports) so a test can import it` };
-  const why = { text: module.text };
+  const why = { text: module.text, declared: module.declared };
   let cases = null;
   if (['boundary', 'nullish', 'throws'].includes(finding.category)) {
     const guard = guardFor(entry.node, finding);
