@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { report, score } from '../src/index.js';
 import { parseIstanbul, parseLcov, attachCoverage } from '../src/coverage.js';
-import { parseDiff, filterToDiff } from '../src/diff.js';
+import { parseDiff, filterToDiff, canonicalPath } from '../src/diff.js';
 
 test('finds deterministic edge-case evidence without executing source', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'quelltest-'));
@@ -57,7 +57,7 @@ test('istanbul: branch findings need every side taken; unknown files are uncover
 
 test('parseDiff and filterToDiff map changed ranges to findings', () => {
   const ranges = parseDiff('+++ b/src/a.js\n@@ -1,0 +2,3 @@\n+x\n@@ -9 +20 @@\n+y\n@@ -5,2 +0,0 @@\n', '/repo');
-  assert.deepEqual(ranges.get(path.resolve('/repo', 'src/a.js')), [[2, 4], [20, 20]]);
+  assert.deepEqual(ranges.get(canonicalPath(path.resolve('/repo', 'src/a.js'))), [[2, 4], [20, 20]]);
   const findings = [{ file: 'src/a.js', line: 3, endLine: 3 }, { file: 'src/a.js', line: 10, endLine: 10 }];
   assert.equal(filterToDiff(findings, ranges, '/repo').length, 1);
 });
