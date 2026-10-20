@@ -81,7 +81,7 @@ npm run pack:check
 npm run test:ci
 ```
 
-CI runs on Node 20, 22 and 24 (plus Windows and macOS on Node 22). A PR workflow runs quelltest on every pull request, limited to changed lines, and publishes the report to the job summary and a PR comment.
+quelltest needs Node 22.18+ or 24.11+. CI runs on Node 22 and 24 (plus Windows and macOS on Node 22). A PR workflow runs quelltest on every pull request, limited to changed lines, and publishes the report to the job summary and a PR comment.
 
 ## Community
 

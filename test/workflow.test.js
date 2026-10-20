@@ -4,7 +4,7 @@ import fs from 'node:fs';
 
 test('CI workflow covers supported Node versions and package quality checks', () => {
   const workflow = fs.readFileSync('.github/workflows/ci.yml', 'utf8');
-  assert.match(workflow, /node: \[20, 22, 24\]/);
+  assert.match(workflow, /node: \[22, 24\]/);
   assert.match(workflow, /windows-latest/);
   assert.match(workflow, /macos-14/);
   assert.match(workflow, /npm run test:ci/);

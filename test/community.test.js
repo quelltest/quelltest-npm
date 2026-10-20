@@ -41,8 +41,9 @@ test('CONTRIBUTING only mentions npm scripts that exist and the licence the pack
   for (const match of text.matchAll(/npm run (\w[\w:-]*)/g)) assert.ok(pkg.scripts[match[1]], `npm run ${match[1]} does not exist`);
   assert.match(text, /Apache License 2\.0/);
   assert.equal(pkg.license, 'Apache-2.0');
-  assert.match(text, /Node\.js 20/);
-  assert.equal(pkg.engines.node, '>=20');
+  assert.match(text, /Node\.js 22\.18/);
+  const parser = JSON.parse(read('node_modules/@babel/parser/package.json'));
+  assert.equal(pkg.engines.node, parser.engines.node, 'engines.node must match what the runtime dependency @babel/parser supports');
 });
 
 test('the architecture doc describes modules that exist', () => {
