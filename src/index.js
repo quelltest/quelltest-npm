@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { generate } from './generator.js';
+import { generate, generateWithLlm } from './generator.js';
 import { verifyGenerated } from './verification.js';
 import { scan } from './scan.js';
 import { score } from './score.js';
@@ -26,4 +26,4 @@ export function report(root = '.', options = {}) {
   return result;
 }
 
-export { scan, score, generate, verifyGenerated, toSarif };
+export { scan, score, generate, generateWithLlm, verifyGenerated, toSarif };

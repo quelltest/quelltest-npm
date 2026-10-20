@@ -1,7 +1,7 @@
 export const COMMANDS = ['find', 'score', 'generate', 'verify'];
 
-const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests']);
-const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner']);
+const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify']);
+const VALUES = new Set(['threshold', 'top', 'coverage', 'diff', 'source', 'runner', 'destination', 'llm']);
 const REPEATABLE = new Set(['include', 'exclude', 'function']);
 const ALIASES = { ignore: 'exclude', h: 'help', v: 'version' };
 

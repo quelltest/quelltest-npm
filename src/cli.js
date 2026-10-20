@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import { report, generate, toSarif, verifyGenerated } from './index.js';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { report, generate, generateWithLlm, toSarif, verifyGenerated } from './index.js';
 import { parseArgs, UsageError, COMMANDS } from './cli-args.js';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -24,10 +26,13 @@ Options:
   --include GLOB         only scan matching files (repeatable)
   --exclude GLOB         skip matching files (repeatable; alias --ignore; also .quellignore)
   --include-tests        scan test files too
-  --write                generate: write scaffolds to disk
+  --write                generate: write tests (and TODO notes) to disk
+  --destination DIR      generate: output directory (default: tests/quelltest)
+  --verify               generate: run each test and require it to fail on a source mutant
+  --llm MODULE           generate: ESM module whose default export writes tests for findings the rules cannot
   --source FILE          verify: source file to mutate (required)
   --function NAME        verify: only mutate this function (repeatable)
-  --runner NAME          verify: node (default), jest, vitest or mocha
+  --runner NAME          generate/verify: node, jest, vitest or mocha (generate default: detected from package.json)
   -h, --help | -v, --version`;
 
 function printFind(result, options) {
@@ -59,7 +64,7 @@ function runVerify(testFile, options) {
   return result.verified ? EXIT.ok : EXIT.belowThreshold;
 }
 
-function run(argv) {
+async function run(argv) {
   const { command, root, hasPath, options } = parseArgs(argv);
   if (options.help) { console.log(HELP); return EXIT.ok; }
   if (options.version) { console.log(VERSION); return EXIT.ok; }
@@ -70,9 +75,19 @@ function run(argv) {
   const scanOptions = { include: options.include, exclude: options.exclude, includeTests: options['include-tests'], coverage: options.coverage, diff: options.diff };
   const result = report(root, scanOptions);
   if (command === 'generate') {
-    const generated = { ...result, findings: generate(result, { write: options.write }) };
-    if (options.json) console.log(JSON.stringify(generated, null, 2));
-    else console.log(`${options.write ? 'Generated' : 'Planned'} ${generated.findings.length} scaffolds`);
+    const generateOptions = { write: options.write, destination: options.destination, runner: options.runner, verify: options.verify };
+    let findings;
+    if (options.llm) {
+      const { default: llm } = await import(pathToFileURL(path.resolve(options.llm)).href);
+      findings = await generateWithLlm(result, { ...generateOptions, llm });
+    } else findings = generate(result, generateOptions);
+    if (options.json) console.log(JSON.stringify({ ...result, findings }, null, 2));
+    else {
+      const count = (status) => findings.filter((item) => item.status === status).length;
+      const tests = count('GENERATED') + count('VERIFIED');
+      console.log(`${options.write ? 'Wrote' : 'Planned'} ${tests} tests (${count('VERIFIED')} verified), ${count('TODO')} TODO notes, ${count('FLAGGED')} flagged`);
+      for (const item of findings.filter((entry) => entry.status === 'TODO').slice(0, 5)) console.log(`  TODO ${item.file}:${item.line} — ${item.reason}`);
+    }
   } else if (options.sarif) console.log(JSON.stringify(toSarif(result, VERSION), null, 2));
   else if (options.json) console.log(JSON.stringify(result, null, 2));
   else if (command === 'score') printScore(result);
@@ -84,7 +99,7 @@ function run(argv) {
 }
 
 try {
-  process.exitCode = run(process.argv.slice(2));
+  process.exitCode = await run(process.argv.slice(2));
 } catch (error) {
   const hint = error instanceof UsageError ? '\nRun `quell --help` for usage.' : '';
   console.error(`quell: ${error.code === 'ENOENT' ? `no such file or directory: ${error.path}` : error.message}${hint}`);
