@@ -13,6 +13,7 @@ const QUERY_METHODS = new Set(['find', 'findOne', 'findOneAndUpdate', 'findOneAn
 const PROMISE_METHODS = new Set(['save', 'create', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany', 'insertOne', 'insertMany', 'findByIdAndUpdate', 'findOneAndUpdate', 'findByIdAndDelete', 'findOneAndDelete', 'replaceOne']);
 const LOOKUP_METHODS = new Set(['exists', 'findOne', 'countDocuments']);
 const FS_PATH_SINKS = /^(?:fs\.(?:promises\.)?(?:readFile|readFileSync|createReadStream|writeFile|writeFileSync|unlink|unlinkSync|readdir|readdirSync|rm|rmSync)|(?:res|response)\.(?:sendFile|download)|path\.(?:join|resolve))$/;
+const NETWORK_CALL = /^(?:fetch|axios|got|ky|(?:axios|got|ky|http|https)\.(?:get|post|put|patch|delete|request)|(?:axios|got|ky)\.(?:head|options))$/;
 const ARRAY_METHODS = new Set(['map', 'filter', 'forEach', 'reduce', 'find', 'some', 'every', 'flatMap']);
 const SCHEMA_CALLS = new Set(['parse', 'safeParse', 'parseAsync', 'safeParseAsync']);
 const PRIVILEGED_FIELD = /^(?:status|role|roles|isAdmin|isActive|permissions|plan|type)$/;
@@ -40,7 +41,7 @@ const RULE_RISK = {
   'mass-assignment': 10, 'regex-injection': 10, 'nosql-injection': 10, 'path-traversal': 10, 'eval-input': 10,
   'unguarded-call': 9, 'check-then-act': 9, 'hard-coded-secret': 9,
   'open-redirect': 8, 'missing-await': 8, 'unparsed-json': 7,
-  'unguarded-member-call': 6, 'unhandled-async-route': 5, 'falsy-fallback': 4,
+  'unguarded-network-call': 7, 'unguarded-member-call': 6, 'unhandled-async-route': 5, 'deep-response-chain': 5, 'falsy-fallback': 4,
 };
 
 // How much to trust a finding, from precision on the bundled benchmark (eval/) and on real code reviews.
@@ -48,7 +49,7 @@ export const CONFIDENCE_RANK = { low: 0, medium: 1, high: 2 };
 const RULE_CONFIDENCE = {
   'nosql-injection': 'high', 'path-traversal': 'high', 'eval-input': 'high', 'unparsed-json': 'high', 'hard-coded-secret': 'high', 'missing-await': 'high',
   'mass-assignment': 'high', 'unguarded-call': 'high',
-  'regex-injection': 'medium', 'open-redirect': 'medium', 'check-then-act': 'medium', 'unguarded-member-call': 'medium', 'unhandled-async-route': 'medium', 'falsy-fallback': 'medium',
+  'regex-injection': 'medium', 'open-redirect': 'medium', 'unguarded-network-call': 'medium', 'deep-response-chain': 'medium', 'check-then-act': 'medium', 'unguarded-member-call': 'medium', 'unhandled-async-route': 'medium', 'falsy-fallback': 'medium',
 };
 const CATEGORY_CONFIDENCE = { throws: 'high', boundary: 'medium', schema: 'medium', jsdoc: 'medium', nullish: 'low', async: 'low' };
 
@@ -76,6 +77,8 @@ export const RULES = {
   'hard-coded-secret': 'secret-looking value is committed in source; load it from the environment and test the missing-config path',
   'eval-input': 'dynamic code evaluation with a non-literal argument; remove it or test hostile input',
   'unparsed-json': 'JSON.parse on request data outside try/catch throws on malformed input; test invalid JSON',
+  'unguarded-network-call': 'network call can reject or hang and nothing handles it; test a rejected call, a non-2xx status and a timeout (stub the client)',
+  'deep-response-chain': 'deep or indexed read on a response crashes when the shape differs; test an empty or missing field and read it with optional chaining',
 };
 
 function rootName(node) {
@@ -330,6 +333,9 @@ export function scanSource(text, file, options = {}) {
     return false;
   };
 
+  /** A network call is handled inside try/catch, a known async wrapper, or a promise chain that ends in `.catch`. */
+  const networkHandled = () => inTryOrWrapper() || ancestors.slice(0, -1).some((n) => n.type === 'CallExpression' && propertyName(n.callee) === 'catch');
+
   const inTryOrWrapper = () => ancestors.slice(0, -1).some((n) => n.type === 'TryStatement'
     || (n.type === 'CallExpression' && ASYNC_WRAPPERS.test(n.callee.name ?? propertyName(n.callee) ?? '')));
 
@@ -383,6 +389,11 @@ export function scanSource(text, file, options = {}) {
       emit(node, 'risk', { rule: 'check-then-act' });
     }
 
+    if (NETWORK_CALL.test(calleeText) && !networkHandled(node)) {
+      const options = node.arguments.find((arg) => arg.type === 'ObjectExpression');
+      const hasLimit = options?.properties.some((prop) => ['signal', 'timeout'].includes(prop.key?.name));
+      emit(node, 'risk', { rule: 'unguarded-network-call', suggestion: `${RULES['unguarded-network-call']}${hasLimit ? '' : '; set a timeout or signal'}` });
+    }
     if (SECRET_ARG_CALLS.test(calleeText)) {
       const keyArg = node.arguments[1];
       if (keyArg?.type === 'StringLiteral' && keyArg.value.length >= 8 && !/\s/.test(keyArg.value)) emit(node, 'risk', { rule: 'hard-coded-secret', evidence: `${calleeText}(…, "…")` });
@@ -438,6 +449,22 @@ export function scanSource(text, file, options = {}) {
     return !awaited && readsField;
   };
 
+  /** `res.data.items[0].plan`: the outermost non-optional read with an index or four levels on a response-like value. */
+  const isDeepResponseRead = (node) => {
+    const parent = ancestors.at(-2);
+    if ((parent?.type === 'MemberExpression' && parent.object === node) || (parent?.type === 'AssignmentExpression' && parent.left === node)) return false;
+    if (hasOptional(node) || parent?.type === 'UnaryExpression') return false;
+    let depth = 0;
+    let indexed = false;
+    let current = node;
+    while (current.type === 'MemberExpression') {
+      depth += 1;
+      if (current.computed && current.property.type === 'NumericLiteral') indexed = true;
+      current = current.object;
+    }
+    return current.type === 'Identifier' && /^(?:res|resp|response|r|result|payload|json)$/i.test(current.name) && (indexed || depth >= 4);
+  };
+
   const onVisit = (node) => {
     if (node.type === 'ThrowStatement' && node.argument?.type === 'NewExpression') {
       const callee = node.argument.callee;
@@ -472,6 +499,7 @@ export function scanSource(text, file, options = {}) {
       emit(node.expression, 'risk', { rule: 'missing-await' });
     }
     if (node.type === 'LogicalExpression' && node.operator === '||') onFallback(node);
+    if (node.type === 'MemberExpression' && isDeepResponseRead(node)) emit(node, 'risk', { rule: 'deep-response-chain' });
   };
 
   const traverse = (node, parent) => {
