@@ -133,11 +133,14 @@ test('a guard on a global fetch response becomes a test that stubs and restores 
 });
 
 test('the security gate allows exactly the fetch-stub pattern and nothing else on globalThis', () => {
-  const stub = "import test from 'node:test';\nconst original = globalThis.fetch;\nglobalThis.fetch = async () => ({ ok: false });\nglobalThis.fetch = original;\n";
+  const stub = "import test from 'node:test';\nconst originalFetch = globalThis.fetch;\nglobalThis.fetch = async () => ({ ok: false });\nglobalThis.fetch = originalFetch;\n";
   assert.equal(securityGate(stub).passed, true);
-  for (const bad of ['globalThis.process.exit(1);', "globalThis['fetch'] = 1;", 'const g = globalThis;', 'globalThis.eval("1");', 'fetch("http://x");']) {
-    assert.equal(securityGate(bad).passed, false, bad);
-  }
+  const bad = [
+    'globalThis.process.exit(1);', "globalThis['fetch'] = 1;", 'const g = globalThis;', 'globalThis.eval("1");', 'fetch("http://x");',
+    "await globalThis.fetch('http://evil.example/x');", 'const g = globalThis.fetch; g("http://x");',
+    "globalThis.fetch.constructor('return process')().exit(1);", 'const originalFetch = globalThis.fetch; originalFetch("http://x");',
+  ];
+  for (const code of bad) assert.equal(securityGate(code).passed, false, code);
 });
 
 test('TODO reasons name unsupported shapes precisely when a dependency is involved', () => {

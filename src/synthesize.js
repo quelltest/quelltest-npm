@@ -1,9 +1,11 @@
-import { collectShallow } from './ast.js';
+import { collectShallow, someShallow } from './ast.js';
 import { literalSource, RELATIONAL_FLIP } from './unit.js';
 
-export const BUILTIN_ERRORS = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError']);
 const BASE_VALUES = [1, 0, -1, 10, 'a', '', null, undefined, true, false];
 const MAX_VALUES_PER_KEY = 8;
+// Member names that would walk into the prototype chain when a value is composed into an object.
+const UNSAFE_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+const NETWORK_CALL = /^(?:axios|got|ky|http|https)(?:\.\w+)?$/;
 const OPERATORS = {
   '<': (a, b) => a < b, '>': (a, b) => a > b, '<=': (a, b) => a <= b, '>=': (a, b) => a >= b,
   '===': (a, b) => a === b, '!==': (a, b) => a !== b,
@@ -15,6 +17,10 @@ const OPERATORS = {
 
 // `undefined` is a legitimate assigned value (`userId = undefined`), so "nothing assigned" needs its own marker.
 const MISSING = Symbol('missing');
+// "Some object": the root value of a subject whose properties are also tested (`if (!body) ...; if (body.lat > 90) ...`).
+const OBJECT = Symbol('object');
+// A local name that two declarations share; guards on it cannot be attributed to one call.
+const AMBIGUOUS = Symbol('ambiguous');
 
 /** Source text that must be emitted verbatim by `render`. */
 class Raw {
@@ -26,8 +32,12 @@ class Raw {
 /** Render a JS value (primitive, nested plain object, or `Raw` source) as source text. */
 export function render(value) {
   if (value instanceof Raw) return value.source;
+  if (value === OBJECT) return '{}';
   if (value === undefined) return 'undefined';
-  if (value !== null && typeof value === 'object') return `{ ${Object.entries(value).map(([key, inner]) => `${JSON.stringify(key)}: ${render(inner)}`).join(', ')} }`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value);
+    return entries.length ? `{ ${entries.map(([key, inner]) => `${JSON.stringify(key)}: ${render(inner)}`).join(', ')} }` : '{}';
+  }
   return JSON.stringify(value);
 }
 
@@ -38,12 +48,13 @@ export function render(value) {
 // stub is built from values that satisfy them.
 
 function memberName(node) {
-  if (!node.computed) return node.property.name;
-  const { property } = node;
-  return property.type === 'StringLiteral' || property.type === 'NumericLiteral' ? String(property.value) : null;
+  const name = node.computed
+    ? (node.property.type === 'StringLiteral' || node.property.type === 'NumericLiteral' ? String(node.property.value) : null)
+    : node.property.name;
+  return name === null || UNSAFE_NAMES.has(name) ? null : name;
 }
 
-/** `{ root, path }` for `a`, `a.b`, `a?.b['c']`; null for anything else. */
+/** `{ root, path }` for `a`, `a.b`, `a?.b['c']`; null for anything else (including prototype-walking names). */
 function chainOf(node) {
   const path = [];
   let current = node;
@@ -60,6 +71,7 @@ function subjectOf(node, ctx) {
   const chain = node.type === 'Identifier' ? { root: node.name, path: [] } : chainOf(node);
   if (!chain) return null;
   const result = ctx.results.get(chain.root);
+  if (result === AMBIGUOUS) return null;
   if (result) {
     const path = [...result.prefix, ...chain.path];
     return { group: `d:${result.key}`, key: `d:${result.key}|${path.join('.')}`, path };
@@ -68,39 +80,64 @@ function subjectOf(node, ctx) {
   return null;
 }
 
-/** Calls whose result the caller controls: a parameter (`fetchUser(id)`), a method of one (`User.findOne(q)`), or global `fetch`. */
-function collectDependencies(entry, params) {
-  const results = new Map(); // local variable -> { key, prefix }
+const isCall = (node) => node?.type === 'CallExpression' || node?.type === 'OptionalCallExpression';
+
+/**
+ * Calls whose result the caller controls: a parameter (`fetchUser(id)`), a method of one (`User.findOne(q)`), or the
+ * global `fetch` (only when the module does not declare or import its own). `captured` holds the call nodes that will be
+ * stubbed; any other network call would hit the real network when the generated test runs.
+ */
+function collectDependencies(entry, params, declared) {
+  const results = new Map(); // local variable -> { key, prefix } | AMBIGUOUS
   const deps = new Map(); // key -> { key, kind, root, chain, awaited, parent }
+  const captured = new Set();
   const declarators = collectShallow(entry.node.body, (node) => node.type === 'VariableDeclarator' && node.init);
+  const bind = (name, value) => {
+    if (UNSAFE_NAMES.has(name)) return;
+    results.set(name, results.has(name) ? AMBIGUOUS : value);
+  };
   for (const declarator of declarators) {
     const awaited = declarator.init.type === 'AwaitExpression';
     const call = awaited ? declarator.init.argument : declarator.init;
-    if (call?.type !== 'CallExpression') continue;
+    if (!isCall(call)) continue;
     let info = null;
     if (call.callee.type === 'Identifier') {
       if (params.has(call.callee.name)) info = { key: call.callee.name, kind: 'fn', root: call.callee.name, chain: [] };
-      else if (call.callee.name === 'fetch') info = { key: 'fetch', kind: 'global-fetch' };
+      else if (call.callee.name === 'fetch' && !declared?.has('fetch')) info = { key: 'fetch', kind: 'global-fetch' };
     } else {
       const chain = chainOf(call.callee);
       if (chain && params.has(chain.root)) info = { key: `${chain.root}.${chain.path.join('.')}`, kind: 'method', root: chain.root, chain: chain.path };
-      else if (chain && results.has(chain.root) && chain.path.length === 1 && ['json', 'text'].includes(chain.path[0])) {
+      else if (chain && results.get(chain.root) && results.get(chain.root) !== AMBIGUOUS && chain.path.length === 1 && ['json', 'text'].includes(chain.path[0])) {
         const parent = results.get(chain.root).key;
         info = { key: `${parent}#body`, kind: 'body', parent };
       }
     }
     if (!info) continue;
+    captured.add(call);
     deps.set(info.key, { ...info, awaited });
-    if (declarator.id.type === 'Identifier') results.set(declarator.id.name, { key: info.key, prefix: [] });
+    if (declarator.id.type === 'Identifier') bind(declarator.id.name, { key: info.key, prefix: [] });
     else if (declarator.id.type === 'ObjectPattern') {
       for (const prop of declarator.id.properties) {
         const name = prop.key?.name ?? prop.key?.value;
         const local = prop.value?.type === 'AssignmentPattern' ? prop.value.left : prop.value;
-        if (name && local?.type === 'Identifier') results.set(local.name, { key: info.key, prefix: [name] });
+        if (name && !UNSAFE_NAMES.has(name) && local?.type === 'Identifier') bind(local.name, { key: info.key, prefix: [name] });
       }
     }
   }
-  return { results, deps };
+  return { results, deps, captured };
+}
+
+/** A call that would reach the real network when the generated test runs: unstubbed global fetch, or an HTTP client module. */
+function unstubbedNetworkCall(entry, captured, declared) {
+  let found = null;
+  someShallow(entry.node.body, (node) => {
+    if (!isCall(node) || captured.has(node)) return false;
+    const callee = node.callee;
+    const name = callee.type === 'Identifier' ? callee.name : chainOf(callee)?.root;
+    if ((callee.type === 'Identifier' && name === 'fetch' && !declared?.has('fetch')) || (name && NETWORK_CALL.test(name))) found = name;
+    return Boolean(found);
+  });
+  return found;
 }
 
 // --- terms ---------------------------------------------------------------------------------------------------------
@@ -145,14 +182,15 @@ function termOf(node, ctx) {
 
 const splitOr = (node) => (node.type === 'LogicalExpression' && node.operator === '||' ? [...splitOr(node.left), ...splitOr(node.right)] : [node]);
 
-function evaluate(term, value) {
+function evaluate(term, rawValue) {
+  const value = rawValue === OBJECT ? {} : rawValue;
   if (term.kind === 'falsy') return !value;
   if (term.kind === 'truthy') return Boolean(value);
   if (term.kind === 'typeof') return OPERATORS[term.op](typeof value, term.value);
   return OPERATORS[term.op](value, term.value);
 }
 
-function candidatesFor(terms) {
+function candidatesFor(terms, hasChildren = false) {
   // A condition that only asks "is it truthy?" is best explored with real booleans first (`r.ok`, `user.active`).
   const booleanOnly = terms.every((term) => term.kind === 'truthy' || term.kind === 'falsy');
   const derived = booleanOnly ? [true, false] : [];
@@ -162,8 +200,9 @@ function candidatesFor(terms) {
     else if (typeof term.value === 'string') derived.push(term.value, `${term.value}x`);
     else if (term.value === null || term.value === undefined) derived.push(null, undefined);
   }
+  // When properties of the subject are tested as well, the subject itself has to be an object to reach them.
   const seen = new Set();
-  return [...derived, ...BASE_VALUES].filter((value) => {
+  return [...(hasChildren ? [OBJECT] : []), ...derived, ...BASE_VALUES].filter((value) => {
     const key = `${typeof value}:${render(value)}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -199,23 +238,32 @@ function consequentOf(guard, text) {
 
 // --- composing arguments ---------------------------------------------------------------------------------------------
 
-/** Build the value for one group (`p:name` or `d:key`) from assignments such as `body.lat = 1`, `status = 200`. */
+/**
+ * Build the value for one group (`p:name` or `d:key`) from assignments such as `body.lat = 1`, `status = 200`.
+ * A group whose root is "some object" (or unassigned) becomes an object holding its properties; a root assigned a real
+ * value (`''`, `null`, `0`) wins, because that is the case being tested.
+ */
 function composeValue(assignment, group, extras = {}) {
   const prefix = `${group}|`;
-  let root;
+  let rootValue = MISSING;
+  let tree;
   for (const [key, value] of assignment) {
     if (!key.startsWith(prefix)) continue;
     const path = key.slice(prefix.length);
-    if (path === '') return value;
-    root ??= {};
-    let cursor = root;
+    if (path === '') {
+      rootValue = value;
+      continue;
+    }
+    tree ??= Object.create(null);
+    let cursor = tree;
     const parts = path.split('.');
-    parts.slice(0, -1).forEach((part) => { cursor = (typeof cursor[part] === 'object' && cursor[part] !== null) ? cursor[part] : (cursor[part] = {}); });
+    parts.slice(0, -1).forEach((part) => { cursor = (typeof cursor[part] === 'object' && cursor[part] !== null) ? cursor[part] : (cursor[part] = Object.create(null)); });
     cursor[parts.at(-1)] = value;
   }
+  if (rootValue !== MISSING && rootValue !== OBJECT) return rootValue;
   const hasExtras = Object.keys(extras).length > 0;
-  if (root === undefined && !hasExtras) return MISSING;
-  return { ...(root ?? {}), ...extras };
+  if (tree === undefined && !hasExtras) return rootValue === OBJECT ? {} : MISSING;
+  return { ...(tree ?? {}), ...extras };
 }
 
 function depValue(assignment, dep, deps) {
@@ -226,18 +274,21 @@ function depValue(assignment, dep, deps) {
   return value === MISSING ? {} : value;
 }
 
+const depStub = (dep, assignment, deps) => `${dep.awaited ? 'async ' : ''}() => (${render(depValue(assignment, dep, deps))})`;
+
 function stubFor(paramName, assignment, deps) {
   const own = [...deps.values()].filter((dep) => dep.root === paramName);
   if (!own.length) return null;
-  const make = (dep) => `${dep.awaited ? 'async ' : ''}() => (${render(depValue(assignment, dep, deps))})`;
   const direct = own.find((dep) => dep.kind === 'fn');
-  if (direct) return make(direct);
-  const tree = {};
-  for (const dep of own) {
+  const methods = own.filter((dep) => dep.kind === 'method');
+  const tree = Object.create(null);
+  for (const dep of methods) {
     let cursor = tree;
-    dep.chain.slice(0, -1).forEach((part) => { cursor = cursor[part] ??= {}; });
-    cursor[dep.chain.at(-1)] = new Raw(make(dep));
+    dep.chain.slice(0, -1).forEach((part) => { cursor = cursor[part] ??= Object.create(null); });
+    cursor[dep.chain.at(-1)] = new Raw(depStub(dep, assignment, deps));
   }
+  if (direct && methods.length) return `Object.assign(${depStub(direct, assignment, deps)}, ${render(tree)})`;
+  if (direct) return depStub(direct, assignment, deps);
   return render(tree);
 }
 
@@ -249,14 +300,31 @@ function stubFor(paramName, assignment, deps) {
  * All guards in the function define the path conditions. A base assignment makes every guard false; then one subject at a
  * time is varied around the constants in the target guard, and the expected outcome is that of the first guard (in source
  * order) that fires. Cases marked `optional` only assert that nothing else threw; they are dropped first if a run disagrees.
- * Returns null when the guard is not simple enough to reason about statically (`why.reason` says why).
+ * Returns null when the guard is not simple enough to reason about statically (`why.reason` says why): it must be a
+ * top-level statement of the function, no parameter may be reassigned, and no call may reach the real network unstubbed.
  */
 export function guardCases(entry, guard, siblings = [], why = {}) {
   const params = new Map(entry.params.filter((p) => p.name).map((p) => [p.name, p]));
-  const { results, deps } = collectDependencies(entry, params);
+  const { results, deps, captured } = collectDependencies(entry, params, why.declared);
   const ctx = { params, results };
   const text = why.text;
   const sourceOf = (node) => (text ? text.slice(node.start, node.end).replace(/\s+/g, ' ').trim().slice(0, 80) : 'a term');
+
+  const topLevel = entry.node.body.type === 'BlockStatement' ? entry.node.body.body : [];
+  if (!topLevel.includes(guard)) {
+    why.reason = 'the guard is nested inside another condition, loop or else-branch, so reaching it depends on more than the arguments';
+    return null;
+  }
+  const reassigned = [...params.keys()].find((name) => someShallow(entry.node.body, (node) => node.type === 'AssignmentExpression' && node.left.type === 'Identifier' && node.left.name === name));
+  if (reassigned) {
+    why.reason = `parameter \`${reassigned}\` is reassigned inside the function, so the guard no longer tests the argument`;
+    return null;
+  }
+  const network = unstubbedNetworkCall(entry, captured, why.declared);
+  if (network) {
+    why.reason = `the function calls \`${network}\` without a stubbable result (the call must be \`const x = await ${network}(...)\` or go through a parameter), so a generated test would reach the real network`;
+    return null;
+  }
 
   const analyse = (node) => {
     const nodes = splitOr(node.test);
@@ -275,18 +343,22 @@ export function guardCases(entry, guard, siblings = [], why = {}) {
     return null;
   }
 
-  // Other analysable guards constrain which values are "safe"; those in the same block also decide which guard fires first.
-  const topLevel = entry.node.body.type === 'BlockStatement' ? entry.node.body.body : [];
+  // Other analysable guards constrain which values are "safe"; the top-level ones also decide which guard fires first.
   const analysed = siblings.filter((other) => other !== guard).map(analyse).filter((item) => !item.unsupported);
   analysed.push(target);
-  const ordered = (topLevel.includes(guard) ? analysed.filter((item) => topLevel.includes(item.node)) : [target]).sort((a, b) => a.node.start - b.node.start);
+  const ordered = analysed.filter((item) => topLevel.includes(item.node)).sort((a, b) => a.node.start - b.node.start);
+  // An earlier top-level guard we cannot read may return first, so "nothing fires" can no longer be asserted.
+  const targetIndex = topLevel.indexOf(guard);
+  const unreadableBefore = topLevel.slice(0, targetIndex).some((statement) => statement.type === 'IfStatement' && !ordered.some((item) => item.node === statement));
 
   const termsByKey = new Map();
   for (const item of analysed) for (const term of item.terms) termsByKey.set(term.key, [...(termsByKey.get(term.key) ?? []), term]);
+  const groupsWithChildren = new Set([...termsByKey.keys()].filter((key) => !key.endsWith('|')).map((key) => key.split('|')[0]));
+  const candidates = (key) => candidatesFor(termsByKey.get(key), key.endsWith('|') && groupsWithChildren.has(key.split('|')[0]));
 
   const base = new Map();
   for (const [key, terms] of termsByKey) {
-    const options = candidatesFor(terms);
+    const options = candidates(key);
     const index = options.findIndex((candidate) => terms.every((term) => !evaluate(term, candidate)));
     if (index < 0) {
       why.reason = 'the guards in this function cannot all be false at once, so no input reaches this one';
@@ -296,28 +368,32 @@ export function guardCases(entry, guard, siblings = [], why = {}) {
   }
 
   const firing = (assignment) => ordered.find((item) => item.terms.some((term) => evaluate(term, assignment.get(term.key))));
-  const argsFor = (assignment) => entry.params.map((param) => {
+  const argsFor = (assignment, varied) => entry.params.map((param) => {
     if (!param.name) return param.shape ?? 'undefined';
-    const stub = stubFor(param.name, assignment, deps);
+    // A real value assigned to the parameter itself is the case under test only when that is the subject being varied
+    // (`db = ''`); otherwise the parameter is a dependency and gets its stub.
+    const rootKey = `p:${param.name}|`;
+    const stub = rootKey !== varied || assignment.get(rootKey) === OBJECT ? stubFor(param.name, assignment, deps) : null;
     if (stub) return stub;
     const value = composeValue(assignment, `p:${param.name}`);
     return value === MISSING ? defaultFor(param) : render(value);
   });
   const globalFetch = (assignment) => {
     const dep = deps.get('fetch');
-    return dep ? `${dep.awaited ? 'async ' : ''}() => (${render(depValue(assignment, dep, deps))})` : undefined;
+    return dep ? depStub(dep, assignment, deps) : undefined;
   };
   const describe = (term) => (term.group.startsWith('p:') ? [term.group.slice(2), ...term.path] : [`${term.group.slice(2)} result`, ...term.path]).join('.');
 
   const cases = [];
   for (const key of new Set(target.terms.map((term) => term.key))) {
     const sample = termsByKey.get(key)[0];
-    for (const value of candidatesFor(termsByKey.get(key))) {
+    for (const value of candidates(key)) {
       const assignment = new Map(base).set(key, value);
       const fired = firing(assignment);
-      const common = { args: argsFor(assignment), globalFetch: globalFetch(assignment) };
-      if (fired === target) cases.push({ ...common, ...target.consequent, optional: false, title: `${target.consequent.kind === 'throws' ? 'rejects' : 'handles'} ${describe(sample)} = ${render(value)}` });
-      else if (!fired && target.consequent.kind === 'throws') cases.push({ ...common, kind: 'ok', optional: true, title: `accepts ${describe(sample)} = ${render(value)}` });
+      const common = { args: argsFor(assignment, key), globalFetch: globalFetch(assignment) };
+      const label = value === OBJECT ? 'an object' : render(value);
+      if (fired === target) cases.push({ ...common, ...target.consequent, optional: false, title: `${target.consequent.kind === 'throws' ? 'rejects' : 'handles'} ${describe(sample)} = ${label}` });
+      else if (!fired && !unreadableBefore && target.consequent.kind === 'throws') cases.push({ ...common, kind: 'ok', optional: true, title: `accepts ${describe(sample)} = ${label}` });
     }
   }
   const unique = [...new Map(cases.map((item) => [`${item.kind}|${item.args.join(',')}|${item.globalFetch ?? ''}`, item])).values()];
