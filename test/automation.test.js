@@ -63,6 +63,24 @@ test('the release notes extraction finds the changelog section of the current ve
   assert.doesNotMatch(run.stdout, /^## /m, 'must stop at the next version heading');
 });
 
+test('the recommended branch protection is valid, blocks force pushes and deletion, and requires existing CI checks', () => {
+  const rules = JSON.parse(fs.readFileSync('.github/branch-protection.json', 'utf8'));
+  assert.equal(rules.allow_force_pushes, false);
+  assert.equal(rules.allow_deletions, false);
+  assert.equal(rules.enforce_admins, false);
+  const ci = fs.readFileSync('.github/workflows/ci.yml', 'utf8');
+  for (const context of rules.required_status_checks.contexts) {
+    if (context === 'python-quality') {
+      assert.match(ci, /python-quality:/);
+      continue;
+    }
+    const [, node, os] = /^test \(node (\d+), (.+)\)$/.exec(context);
+    assert.match(ci, new RegExp(`node: \\[[^\\]]*\\b${node}\\b`), `${context}: node ${node} is not in the matrix`);
+    assert.ok(ci.includes(os), `${context}: ${os} is not in the matrix`);
+  }
+  assert.ok(!rules.required_status_checks.contexts.some((context) => /macos/.test(context)), 'macOS is not required while its runners are unreliable');
+});
+
 test('the triage agent only labels from conventional-commit titles and skips fork PRs', () => {
   const text = agents.find(([file]) => file === 'agent-triage.yml')[1];
   assert.match(text, /\(feat\|fix\|docs\|test\|chore\|design\|refactor\|perf\)/);

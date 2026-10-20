@@ -35,6 +35,20 @@ git tag vX.Y.Z && git push upstream vX.Y.Z
 
 The release agent does the rest. Add the repository secret `NPM_TOKEN` (a granular token with publish rights for `quelltest`; if your npm account enforces 2FA for publishing it must be a token that is allowed to bypass it). Without the secret it still creates the GitHub release and tells you to publish by hand.
 
+## Protecting `main`
+
+`.github/branch-protection.json` holds the recommended rules; apply them once (needs repository admin):
+
+```bash
+gh api -X PUT repos/quelltest/quelltest-npm/branches/main/protection --input .github/branch-protection.json
+```
+
+What it sets: no force-pushes, no deletion of `main`, changes must come through a pull request (zero approvals required, so a solo maintainer can still merge), and the Linux Node 20/22/24, Windows and Python checks must pass. Admins are not forced to follow the rules, so a hotfix is still possible.
+
+It deliberately does **not** require the macOS job (GitHub-hosted macOS runners were short on capacity when this was written; a required job that never starts blocks every merge) or the PR guard (add `guard` to `contexts` once the guard workflow is on `main`). Add them to `required_status_checks.contexts` when you want them enforced. If you rename a CI job, update the names here: a required check that no longer exists blocks merging.
+
+In the web UI the same thing is Settings -> Branches -> Add branch protection rule (or the "Protect this branch" button on the repository page): branch `main`, tick "Require a pull request before merging" (0 approvals), "Require status checks to pass before merging" and select the checks above, leave "Allow force pushes" and "Allow deletions" unticked.
+
 ## Safety design
 
 - No workflow uses `pull_request_target`, and no privileged job checks out code from a fork. The Claude workflows skip fork PRs; the triage workflow skips them for the PR job.
