@@ -1,6 +1,6 @@
 {
   "name": "quelltest",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Offline-first edge-case discovery and production-readiness scoring for JavaScript and TypeScript projects.",
   "type": "module",
   "bin": {
