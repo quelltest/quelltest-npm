@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { discoverFiles } from './files.js';
+import { restoreIfInterrupted } from './backup.js';
 import { FUNCTION_TYPES, ROUTE_METHODS, childNodes, collectShallow, functionName, parseSource, propertyName, someShallow } from './ast.js';
 
 const RELATIONAL = new Set(['<', '>', '<=', '>=']);
@@ -204,8 +205,10 @@ export function scan(root = '.', options = {}) {
   const scanRoot = fs.statSync(absolute).isFile() ? path.dirname(absolute) : absolute;
   const findings = [];
   const skipped = [];
+  const restored = [];
   for (const file of discoverFiles(absolute, options)) {
     const relative = path.relative(process.cwd(), file).replaceAll('\\', '/');
+    if (restoreIfInterrupted(file)) restored.push(relative);
     const idFile = path.relative(scanRoot, file).replaceAll('\\', '/');
     const result = scanSource(fs.readFileSync(file, 'utf8'), relative, { idFile });
     if (!result.parsed) skipped.push(relative);
@@ -213,5 +216,5 @@ export function scan(root = '.', options = {}) {
   }
   const unique = [...new Map(findings.map((item) => [item.id, item])).values()];
   unique.sort((a, b) => b.risk - a.risk || a.file.localeCompare(b.file) || a.line - b.line || a.column - b.column);
-  return { version: 1, root: absolute, findings: unique, skipped };
+  return { version: 1, root: absolute, findings: unique, skipped, restored };
 }

@@ -188,3 +188,39 @@ test('CLI generate --write --verify writes verified tests to --destination', () 
   assert.match(ok.stdout, /Wrote \d+ tests \(\d+ verified\)/);
   assert.ok(fs.readdirSync(p.out).some((name) => name.endsWith('.test.mjs')));
 });
+
+test('verification never deletes tests written by an earlier run', () => {
+  const p = project({ 'src/pay.mjs': PAY });
+  const first = generate(report(p.src, { coverage: false }), options(p, { write: true, verify: true }));
+  const written = first.filter((item) => item.output && item.kind === 'test').map((item) => item.output);
+  assert.ok(written.length >= 2);
+  const before = written.map((file) => fs.readFileSync(file, 'utf8'));
+  generate(report(p.src, { coverage: false }), options(p, { verify: true }));
+  assert.deepEqual(written.map((file) => fs.readFileSync(file, 'utf8')), before);
+  assert.equal(fs.readdirSync(p.out).filter((name) => name.includes('probe')).length, 0);
+});
+
+test('a dry-run verification leaves no directory or probe files behind', () => {
+  const p = project({ 'src/pay.mjs': PAY });
+  generate(report(p.src, { coverage: false }), options(p, { verify: true }));
+  assert.equal(fs.existsSync(p.out), false);
+});
+
+test('security gate rejects aliasing, fs access and unlisted imports', () => {
+  for (const bad of ['const p = process; p.exit(1);', 'globalThis["ev" + "al"]("1")', "import fs from 'node:fs';", "const fs = require('fs');", 'module.require("child_process")', "import x from 'left-pad';", 'process["env"].X']) {
+    assert.equal(securityGate(bad).passed, false, bad);
+  }
+  assert.equal(securityGate("import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { f } from '../src/a.js';\nconst o = { process: 1 }; o.global;\n").passed, true);
+});
+
+test('export { f as default } is treated as a default export', async () => {
+  const { describeModule, exportOf } = await import('../src/unit.js');
+  const module = describeModule('function f(n) { if (n < 1) throw new Error("x"); }\nexport { f as default };\n', 'a.mjs');
+  assert.deepEqual(exportOf(module, 'f'), { kind: 'default', name: 'f' });
+});
+
+test('examples work for function names containing regex characters', () => {
+  const p = project({ 'src/dollar.mjs': '/**\n * @example\n * $add(1, 2) // => 3\n */\nexport function $add(a, b) {\n  return a + b;\n}\n' });
+  const results = generate(report(p.src, { coverage: false }), options(p, { verify: true }));
+  assert.ok(results.some((item) => item.status === 'VERIFIED'), JSON.stringify(results.map((r) => r.reason)));
+});

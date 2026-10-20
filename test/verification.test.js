@@ -6,7 +6,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { verifyGenerated } from '../src/index.js';
 import { hasMeaningfulAssertion } from '../src/verification.js';
-import { mutants } from '../src/mutate.js';
+import { mutants, findOperator } from '../src/mutate.js';
+import { scan } from '../src/index.js';
 
 const SOURCE = [
   'export function clamp(value, max) {',
@@ -119,8 +120,39 @@ test('quell verify exits 0 for a verified test and 1 otherwise', () => {
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
   assert.match(ok.stdout, /Verified/);
   fs.writeFileSync(testPath, `${header}test('p', () => { assert.ok(true); });\n`);
-  assert.equal(spawnSync(process.execPath, [cli, 'verify', testPath, '--source', sourceFile], { encoding: 'utf8' }).status, 1);
+  assert.equal(spawnSync(process.execPath, [cli, 'verify', testPath, '--source', sourceFile], { encoding: 'utf8' }).status, 4);
   assert.equal(spawnSync(process.execPath, [cli, 'verify', testPath], { encoding: 'utf8' }).status, 2);
   assert.equal(fs.readFileSync(sourceFile, 'utf8'), SOURCE);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('operator offsets skip comments inside the gap', () => {
+  const text = 'a /* x - y */ - b';
+  assert.equal(findOperator(text, 1, text.length - 1, '-'), text.lastIndexOf('-'));
+  const source = 'export const f = (a, b) => a /* x - y */ - b;\n';
+  const found = mutants(source, 'a.mjs');
+  assert.equal(found.length, 1);
+  assert.equal(found[0].start, source.lastIndexOf('-'));
+});
+
+test('a source file left mutated by a killed run is repaired by scan', () => {
+  const { dir, sourceFile } = project();
+  fs.writeFileSync(`${sourceFile}.quelltest-backup`, SOURCE);
+  fs.writeFileSync(sourceFile, 'export const broken = 1;\n');
+  const result = scan(dir, { includeTests: true });
+  assert.equal(result.restored.length, 1);
+  assert.equal(fs.readFileSync(sourceFile, 'utf8'), SOURCE);
+  assert.equal(fs.existsSync(`${sourceFile}.quelltest-backup`), false);
+});
+
+test('runner that is not installed is an infrastructure error, not a kill', () => {
+  const { sourceFile, testPath } = project();
+  const result = verifyGenerated(STRONG, { sourceFile, testPath, runner: 'jest', cwd: os.tmpdir() });
+  assert.equal(result.verified, false);
+  assert.match(result.reason, /could not run/);
+  assert.equal(fs.readFileSync(sourceFile, 'utf8'), SOURCE);
+});
+
+test('t.* style assertions count as meaningful', () => {
+  assert.equal(hasMeaningfulAssertion('t.assert.equal(f(1), 2)'), true);
 });

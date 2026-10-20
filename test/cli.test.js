@@ -127,3 +127,23 @@ test('CLI generate remains dry-run unless --write is explicit', () => {
   assert.equal(result.status, 0);
   assert.ok(JSON.parse(result.stdout).findings.every((item) => item.output === null));
 });
+
+test('a bare directory name is a path, not an unknown command', () => {
+  const dir = project({ 'src/a.js': SOURCE });
+  const result = spawnSync(process.execPath, [cli, 'src'], { encoding: 'utf8', cwd: dir });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[throws\]/);
+  assert.equal(spawnSync(process.execPath, [cli, 'bogus'], { encoding: 'utf8', cwd: dir }).status, 2);
+});
+
+test('--diff includes brand-new untracked files', () => {
+  const dir = project({ 'a.js': SOURCE });
+  const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir, encoding: 'utf8' });
+  git('init', '-q', '-b', 'main');
+  git('add', '.');
+  git('commit', '-q', '-m', 'base');
+  fs.writeFileSync(path.join(dir, 'new file.js'), 'export function fresh(n) {\n  if (n > 2) throw new Error("big");\n}\n');
+  const result = spawnSync(process.execPath, [cli, 'find', '.', '--diff', 'HEAD', '--json'], { cwd: dir, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(JSON.parse(result.stdout).findings.some((item) => item.function === 'fresh'));
+});

@@ -12,7 +12,7 @@ export interface GeneratedFinding extends Omit<Finding, 'status'> { status: Gene
 export interface LlmContext { finding: Finding; unitSource: string; importPath: string; runner: string; moduleStyle: 'esm' | 'cjs'; exportInfo: { kind: 'named' | 'default'; name: string } | null }
 export declare function generate(report: { findings: Finding[] }, options?: GenerateOptions): GeneratedFinding[];
 export declare function generateWithLlm(report: { findings: Finding[] }, options: GenerateOptions & { llm: (context: LlmContext) => Promise<string | null | undefined> | string | null | undefined }): Promise<GeneratedFinding[]>;
-export interface MutantResult { description: string; line: number; function: string; killed: boolean }
+export interface MutantResult { description: string; line: number; function: string; killed: boolean; outcome: 'killed' | 'survived' | 'timeout' | 'error' }
 export interface VerifyOptions { sourceFile: string; testPath?: string; runner?: "node" | "jest" | "vitest" | "mocha"; functions?: string[]; maxMutants?: number; cwd?: string; timeoutMs?: number }
-export interface VerifyResult { verified: boolean; reason: string | null; correctCode: { passed: boolean; error?: string }; injectedBug: { passed: boolean }; mutants: MutantResult[]; killed: number; total: number; mutationScore: number | null }
+export interface VerifyResult { verified: boolean; reason: string | null; correctCode: { passed: boolean; error?: string }; injectedBug: { passed: boolean }; mutants: MutantResult[]; killed: number; total: number; inconclusive?: number; mutationScore: number | null }
 export declare function verifyGenerated(testSource: string | null, options: VerifyOptions): VerifyResult;

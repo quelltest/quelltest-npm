@@ -6,33 +6,42 @@ import { exampleCases, guardCases } from './synthesize.js';
 import { detectRunner, renderTest, testExtension, RUNNERS } from './runner.js';
 import { verifyGenerated } from './verification.js';
 
-const FORBIDDEN_CALLS = new Set(['eval', 'Function', 'exec', 'execSync', 'execFile', 'execFileSync', 'spawn', 'spawnSync', 'fork', 'fetch', 'XMLHttpRequest', 'WebSocket']);
-const FORBIDDEN_MODULES = /^(?:node:)?(?:child_process|net|http|https|dgram|cluster|worker_threads|vm)$/;
+const ALLOWED_MODULES = new Set(['node:test', 'node:assert', 'node:assert/strict', 'assert', 'assert/strict', 'vitest', '@jest/globals']);
+// Generated tests only need the unit under test and an assertion library; anything that reaches the process, the
+// network, the file system or code evaluation is rejected, including through aliases (`const p = process`).
+const FORBIDDEN_IDENTIFIERS = new Set(['process', 'globalThis', 'global', 'module', 'eval', 'Function', 'fetch', 'XMLHttpRequest', 'WebSocket', 'Deno', 'Bun']);
 
-function* walk(node) {
-  yield node;
-  for (const child of childNodes(node)) yield* walk(child);
+function* walk(node, parent = null) {
+  yield [node, parent];
+  for (const child of childNodes(node)) yield* walk(child, node);
 }
 
+const moduleAllowed = (specifier) => specifier.startsWith('.') || ALLOWED_MODULES.has(specifier);
+
 /**
- * Gate on the generated code itself: it must parse, and must not call process/network/eval APIs
- * or import modules that can. Comments and string contents (such as quoted source evidence) are ignored.
+ * Gate on the generated code itself (this is defence in depth, not a sandbox): it must parse, import only
+ * the unit under test (relative paths) and an assertion/test library, and not reference process, global,
+ * module, eval, Function or network APIs. Comments and string contents (such as quoted evidence) are ignored.
  */
 export function securityGate(source, file = 'generated.test.js') {
   const ast = parseSource(source, file);
   if (!ast) return { passed: false, reason: 'generated source does not parse' };
-  for (const node of walk(ast.program)) {
-    if (node.type === 'CallExpression' || node.type === 'NewExpression') {
-      const name = node.callee.type === 'Identifier' ? node.callee.name : null;
-      if (name && FORBIDDEN_CALLS.has(name)) return { passed: false, reason: `generated source calls ${name}()` };
-      if (name === 'require' && !(node.arguments[0]?.type === 'StringLiteral' && !FORBIDDEN_MODULES.test(node.arguments[0].value))) {
-        return { passed: false, reason: 'generated source requires a forbidden or dynamic module' };
-      }
-      if (node.callee.type === 'Import' || (node.callee.type === 'Identifier' && node.callee.name === 'import')) return { passed: false, reason: 'generated source uses dynamic import' };
+  const fail = (reason) => ({ passed: false, reason });
+  for (const [node, parent] of walk(ast.program)) {
+    if (node.type === 'ImportDeclaration' || ((node.type === 'ExportNamedDeclaration' || node.type === 'ExportAllDeclaration') && node.source)) {
+      if (!moduleAllowed(node.source.value)) return fail(`generated source imports ${node.source.value}`);
     }
-    if (node.type === 'ImportDeclaration' && FORBIDDEN_MODULES.test(node.source.value)) return { passed: false, reason: `generated source imports ${node.source.value}` };
-    if (node.type === 'MemberExpression' && node.object.type === 'Identifier' && node.object.name === 'process' && ['env', 'exit', 'kill', 'binding'].includes(node.property.name)) {
-      return { passed: false, reason: `generated source touches process.${node.property.name}` };
+    if (node.type === 'CallExpression' || node.type === 'NewExpression') {
+      if (node.callee.type === 'Import') return fail('generated source uses dynamic import');
+      if (node.callee.type === 'Identifier' && node.callee.name === 'require') {
+        const specifier = node.arguments[0];
+        if (!(specifier?.type === 'StringLiteral' && moduleAllowed(specifier.value))) return fail('generated source requires a disallowed or dynamic module');
+      }
+    }
+    if (node.type === 'Identifier' && FORBIDDEN_IDENTIFIERS.has(node.name)) {
+      const isPropertyName = (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed)
+        || (parent?.type === 'ObjectProperty' && parent.key === node && !parent.computed && !parent.shorthand);
+      if (!isPropertyName) return fail(`generated source references ${node.name}`);
     }
   }
   return { passed: true, reason: null };
@@ -87,10 +96,24 @@ function finalize(finding, source, ctx, options, seen) {
   let current = source;
   let verification = null;
   if (options.verify) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // Verify a throwaway probe next to the final path. The final path may hold a test from an earlier run
+    // (ids are deterministic), so it is never written or removed here unless the verified test is saved below.
+    const dir = path.dirname(file);
+    const dirExisted = fs.existsSync(dir);
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = file.replace(/(\.test\.[^.]+)$/, '.quelltest-probe$1');
     const run = () => {
-      fs.writeFileSync(file, current, 'utf8');
-      return verifyGenerated(null, { sourceFile, testPath: file, runner, functions: [entry.name], cwd: options.cwd });
+      fs.writeFileSync(probe, current, 'utf8');
+      try {
+        return verifyGenerated(null, { sourceFile, testPath: probe, runner, functions: [entry.name], cwd: options.cwd });
+      } finally {
+        removeFile(probe);
+      }
+    };
+    const cleanup = () => {
+      if (!dirExisted && !options.write) {
+        try { fs.rmdirSync(dir); } catch { /* not empty: leave it */ }
+      }
     };
     verification = run();
     if (!verification.correctCode.passed && rebuild) {
@@ -99,7 +122,7 @@ function finalize(finding, source, ctx, options, seen) {
         current = reduced;
         const duplicate = originalityGate(current, [options.existing ?? '', ...seen].join('\n'));
         if (!duplicate.passed) {
-          removeFile(file);
+          cleanup();
           return { status: 'FLAGGED', kind: 'test', verified: false, reason: duplicate.reason, gates: { ...gates, originality: duplicate }, output: null };
         }
         verification = run();
@@ -107,11 +130,10 @@ function finalize(finding, source, ctx, options, seen) {
     }
     gates.correctCode = verification.correctCode.passed ? 'PASSED' : 'FAILED';
     gates.injectedBug = verification.verified ? 'PASSED' : 'FAILED';
+    cleanup();
     if (!verification.verified) {
-      removeFile(file);
       return { status: 'TODO', kind: 'todo', verified: false, reason: `not verified: ${verification.reason}`, gates, output: null, source: current };
     }
-    if (!options.write) removeFile(file);
   }
   if (options.write) {
     fs.mkdirSync(path.dirname(file), { recursive: true });

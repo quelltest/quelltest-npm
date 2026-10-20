@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+
 export const COMMANDS = ['find', 'score', 'generate', 'verify'];
 
 const FLAGS = new Set(['json', 'sarif', 'all', 'write', 'help', 'version', 'include-tests', 'verify']);
@@ -38,7 +40,8 @@ export function parseArgs(argv) {
   const first = positionals[0];
   const command = COMMANDS.includes(first) ? first : 'find';
   const rest = command === first ? positionals.slice(1) : positionals;
-  if (!COMMANDS.includes(first) && first !== undefined && !first.includes('/') && !first.includes('\\') && !first.startsWith('.') && !/\.[a-z]+$/i.test(first)) {
+  const looksLikePath = (value) => /[\\/]/.test(value) || value.startsWith('.') || /\.[a-z]+$/i.test(value) || fs.existsSync(value);
+  if (!COMMANDS.includes(first) && first !== undefined && !looksLikePath(first)) {
     throw new UsageError(`unknown command ${JSON.stringify(first)} (expected ${COMMANDS.join(', ')})`);
   }
   if (rest.length > 1) throw new UsageError(`expected at most one PATH, got ${rest.length}`);
