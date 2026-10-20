@@ -16,7 +16,8 @@
   "files": [
     "src",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "scripts": {
     "test": "node --test",
@@ -36,7 +37,7 @@
     "typescript",
     "production-readiness"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "@babel/parser": "^7.26.2"
   }
