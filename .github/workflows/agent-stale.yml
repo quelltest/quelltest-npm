@@ -1,0 +1,28 @@
+name: "Agent: stale"
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          days-before-issue-stale: 60
+          days-before-issue-close: 14
+          days-before-pr-stale: 21
+          days-before-pr-close: 14
+          stale-issue-label: stale
+          stale-pr-label: stale
+          exempt-issue-labels: "P0,P1,security,tracking,pinned"
+          exempt-pr-labels: "pinned,do-not-close"
+          stale-issue-message: "No activity for 60 days. This will be closed in 14 days unless there is an update."
+          stale-pr-message: "No activity for 21 days. This will be closed in 14 days unless there is an update."
+          operations-per-run: 60
