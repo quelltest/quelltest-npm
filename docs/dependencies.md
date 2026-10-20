@@ -57,7 +57,7 @@ A stub derived from guards has the shape the code's own conditions imply. It can
      --command "npm run test:integration -- {test}" --timeout 300
    ```
 
-   Use it with Testcontainers or an in-memory server to measure the mutation score against a real database. Races, unique-index errors and transactions only exist there. It costs time: about 1.4 s per mutant with mocks in one report, much more with containers. The command is yours and runs through your shell.
+   Reserve an exit code for "the environment failed" (a container did not start) and pass it as `--infra-exit CODE`; such runs count as inconclusive, never as kills. Use it with Testcontainers or an in-memory server to measure the mutation score against a real database. Races, unique-index errors and transactions only exist there. It costs time: about 1.4 s per mutant with mocks in one report, much more with containers. The command is yours and runs through your shell.
 
 ## Rules for the dependency side
 

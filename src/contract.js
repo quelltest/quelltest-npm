@@ -61,7 +61,16 @@ export function annotatedStubs(text, file = 'a.test.js') {
   return stubs;
 }
 
-const toRegExp = (route) => new RegExp(`^${route.replace(/[.+*?^$()|\\]/g, '\\$&').replace(/\{[^}]+\}|:[A-Za-z_]\w*/g, '[^/]+')}/?$`);
+/**
+ * A route template (`/users/:id`, `/users/{id}`) as a RegExp over a path. Literal parts are escaped (including `[`),
+ * and adjacent parameters are merged into one so the pattern cannot backtrack super-linearly.
+ */
+const toRegExp = (route) => {
+  const literal = route.split(/\{[^}/]+\}|:[A-Za-z_]\w*/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = literal.join('[^/]+').replace(/(?:\[\^\/\]\+){2,}/g, '[^/]+');
+  return new RegExp(`^${pattern}/?$`);
+};
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
 function parseJson(text) {
   try {
@@ -75,9 +84,10 @@ function parseJson(text) {
 export function loadExamples(file) {
   const document = parseJson(fs.readFileSync(file, 'utf8'));
   if (document === undefined) throw new Error(`${file} is not valid JSON (YAML OpenAPI files must be converted to JSON first)`);
+  if (document === null || typeof document !== 'object') throw new Error(`${file} must contain a HAR object, an OpenAPI object, or a list/map of examples`);
   const examples = [];
-  if (document.log?.entries) {
-    for (const entry of document.log.entries) {
+  if (Array.isArray(document.log?.entries)) {
+    for (const entry of document.log.entries.filter(Boolean)) {
       const body = parseJson(entry.response?.content?.text ?? '');
       if (body === undefined) continue;
       let pathname = entry.request?.url ?? '';
@@ -86,7 +96,7 @@ export function loadExamples(file) {
     }
   } else if (document.paths) {
     for (const [route, methods] of Object.entries(document.paths)) {
-      for (const [method, operation] of Object.entries(methods)) {
+      for (const [method, operation] of Object.entries(methods ?? {})) {
         for (const [status, response] of Object.entries(operation?.responses ?? {})) {
           const media = response?.content?.['application/json'];
           const body = media?.example ?? Object.values(media?.examples ?? {})[0]?.value ?? media?.schema?.example;
@@ -95,7 +105,7 @@ export function loadExamples(file) {
       }
     }
   } else {
-    const list = Array.isArray(document) ? document : Object.entries(document).map(([key, value]) => {
+    const list = Array.isArray(document) ? document.filter((item) => item && typeof item === 'object') : Object.entries(document).map(([key, value]) => {
       const [method, route] = key.split(/\s+/);
       return { method, path: route, ...(value && typeof value === 'object' && 'body' in value ? value : { body: value }) };
     });
@@ -118,11 +128,11 @@ export function compareShape(stub, example, where = '') {
   const issues = [];
   const isPartial = partial.has(stub);
   for (const key of Object.keys(example)) {
-    if (!(key in stub)) {
+    if (!hasOwn(stub, key)) {
       if (!isPartial) issues.push({ path: where ? `${where}.${key}` : key, kind: 'missing', message: 'the recorded example has this field, the stub does not' });
     } else issues.push(...compareShape(stub[key], example[key], where ? `${where}.${key}` : key));
   }
-  for (const key of Object.keys(stub)) if (!(key in example)) issues.push({ path: where ? `${where}.${key}` : key, kind: 'extra', message: 'the stub invents this field, the recorded example does not have it' });
+  for (const key of Object.keys(stub)) if (!hasOwn(example, key)) issues.push({ path: where ? `${where}.${key}` : key, kind: 'extra', message: 'the stub invents this field, the recorded example does not have it' });
   return issues;
 }
 

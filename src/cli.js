@@ -46,6 +46,7 @@ Options:
   --min-score N          verify: also require N% of mutants killed
   --handoff FILE         verify: write surviving mutants as Markdown an agent can act on
   --command CMD          verify: run your own command instead of a runner, e.g. "npm run test:integration -- {test}"
+  --infra-exit CODE      verify: exit code your command uses for "the environment failed" (repeatable; not counted as a kill)
   --timeout SECONDS      verify: per-run timeout (default 60)
   --in-place             verify: mutate the source file itself instead of a temporary copy
   --examples FILE        mocks: HAR file, JSON examples file or OpenAPI JSON with recorded responses
@@ -77,7 +78,7 @@ function runVerify(testFile, options) {
   const lines = options.findings ? scan(options.source, { includeTests: true }).findings.map((item) => [item.line, item.endLine]) : undefined;
   const result = verifyGenerated(null, {
     sourceFile: options.source, testPath: testFile, runner: options.runner, functions: options.function, lines,
-    inPlace: options['in-place'], minScore: options['min-score'], command: options.command, timeoutMs: options.timeout ? options.timeout * 1000 : undefined,
+    inPlace: options['in-place'], minScore: options['min-score'], command: options.command, infraExitCodes: options['infra-exit'], timeoutMs: options.timeout ? options.timeout * 1000 : undefined,
   });
   if (options.handoff) fs.writeFileSync(options.handoff, renderHandoff(result, { sourceText: fs.existsSync(options.source) ? fs.readFileSync(options.source, 'utf8') : '' }), 'utf8');
   if (options.json) console.log(JSON.stringify(result, null, 2));

@@ -136,10 +136,14 @@ export function analyzeTests(text, file = 'a.test.js') {
   return tests;
 }
 
-const subjectsOf = (test) => new Set(test.assertions.flatMap((item) => item.subjects ?? []));
+// Names too common to say two tests are about the same thing.
+const GENERIC_SUBJECTS = new Set(['parse', 'stringify', 'get', 'set', 'map', 'filter', 'forEach', 'reduce', 'push', 'includes', 'join', 'split', 'log', 'keys', 'values', 'entries', 'assign', 'resolve', 'reject', 'then', 'catch', 'slice', 'trim', 'toString', 'from', 'of', 'create', 'fn', 'mock', 'spyOn']);
+const subjectsOf = (test) => new Set(test.assertions.flatMap((item) => item.subjects ?? []).filter((name) => !GENERIC_SUBJECTS.has(name)));
+const sharedSubjects = (a, b) => [...subjectsOf(a)].filter((name) => subjectsOf(b).has(name));
+// Two tests are "about the same thing" when they share as many specific subjects as the smaller of them has, up to two.
 const sharesSubject = (a, b) => {
-  const left = subjectsOf(a);
-  return left.size > 0 && [...subjectsOf(b)].some((name) => left.has(name));
+  const smaller = Math.min(subjectsOf(a).size, subjectsOf(b).size);
+  return smaller > 0 && sharedSubjects(a, b).length >= Math.min(2, smaller);
 };
 
 const signature = (test) => test.assertions.map((item) => `${item.method}:${JSON.stringify(item.literals)}`).join('|');
@@ -166,22 +170,28 @@ export function compareTests(baseText, headText, file) {
   }
   const unmatchedHead = new Map([...head].filter(([name]) => !base.has(name)));
   const pairs = [];
+  const unmatchedBase = [];
   for (const [name, test] of base) {
     if (head.has(name)) pairs.push([name, test, head.get(name)]);
-    else {
-      // A renamed test keeps its assertions; pair by signature before calling it deleted.
-      const renamed = [...unmatchedHead].find(([, candidate]) => signature(candidate) === signature(test));
-      const replacement = renamed ? null : [...unmatchedHead].find(([, candidate]) => sharesSubject(test, candidate));
-      if (renamed) {
-        unmatchedHead.delete(renamed[0]);
-        pairs.push([name, test, renamed[1]]);
-      } else if (replacement) {
-        // Deleted and re-written under another name over the same subject: compare strength, and show the pairing.
-        unmatchedHead.delete(replacement[0]);
-        pairs.push([name, test, replacement[1]]);
-        issues.push({ file, test: name, kind: 'test-replaced', severity: 'review', line: replacement[1].line, message: `test deleted and replaced by "${replacement[0]}" (same subject: ${[...subjectsOf(test)].filter((s) => subjectsOf(replacement[1]).has(s)).join(', ')})` });
-      } else if (test.assertions.length || test.skipped === false) issues.push({ file, test: name, kind: 'test-deleted', severity: 'error', line: 1, message: 'test deleted' });
-    }
+    else unmatchedBase.push([name, test]);
+  }
+  // Pass 1: a renamed test keeps its assertions. Doing this for every test first stops a loose match from stealing a later rename.
+  const stillUnmatched = [];
+  for (const [name, test] of unmatchedBase) {
+    const renamed = [...unmatchedHead].find(([, candidate]) => signature(candidate) === signature(test));
+    if (renamed) {
+      unmatchedHead.delete(renamed[0]);
+      pairs.push([name, test, renamed[1]]);
+    } else stillUnmatched.push([name, test]);
+  }
+  // Pass 2: deleted and re-written under another name over the same subject: compare strength, and show the pairing.
+  for (const [name, test] of stillUnmatched) {
+    const replacement = [...unmatchedHead].find(([, candidate]) => sharesSubject(test, candidate));
+    if (replacement) {
+      unmatchedHead.delete(replacement[0]);
+      pairs.push([name, test, replacement[1]]);
+      issues.push({ file, test: name, kind: 'test-replaced', severity: 'review', line: replacement[1].line, message: `test deleted and replaced by "${replacement[0]}" (same subject: ${sharedSubjects(test, replacement[1]).join(', ')})` });
+    } else if (test.assertions.length || test.skipped === false) issues.push({ file, test: name, kind: 'test-deleted', severity: 'error', line: 1, message: 'test deleted' });
   }
   // A newly added `.only` has no base test to pair with, but it stops the rest of the file from running.
   for (const [name, added] of unmatchedHead) {

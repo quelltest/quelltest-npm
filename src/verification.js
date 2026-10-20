@@ -43,15 +43,18 @@ function resolveRunnerEntry(runner, cwd) {
  * Result: `{ passed, command }`, or `{ passed: false, timedOut }`, `{ passed: false, infrastructure }` (the runner itself
  * could not run, which says nothing about the test), or `{ passed: false, error }` for a genuine test failure.
  */
-export function runTest(testFile, { runner = 'node', cwd = path.dirname(testFile), timeoutMs = 60_000, command: custom } = {}) {
+export function runTest(testFile, { runner = 'node', cwd = path.dirname(testFile), timeoutMs = 60_000, command: custom, infraExitCodes = [] } = {}) {
   const spawnOptions = { cwd, env: cleanEnv(), encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 };
   let result;
   let command;
   if (custom) {
     // The user's own command (for example one that starts Testcontainers or an in-memory server). It is theirs, so it
     // runs through the shell; only the quoted test path is substituted.
+    // The path travels in an environment variable, not in the command text: a file name containing `$(...)`, backticks or
+    // `%` can never be interpreted by the shell. `command` keeps the readable form for messages.
     command = custom.replaceAll('{test}', `"${testFile}"`);
-    result = spawnSync(command, { ...spawnOptions, shell: true });
+    const executable = custom.replaceAll('{test}', process.platform === 'win32' ? '"%QUELL_TEST%"' : '"$QUELL_TEST"');
+    result = spawnSync(executable, { ...spawnOptions, env: { ...spawnOptions.env, QUELL_TEST: testFile }, shell: true });
   } else if (runner === 'node') {
     command = `node --test ${testFile}`;
     result = spawnSync(process.execPath, ['--test', testFile], spawnOptions);
@@ -65,6 +68,8 @@ export function runTest(testFile, { runner = 'node', cwd = path.dirname(testFile
   if (result.error?.code === 'ETIMEDOUT') return { passed: false, timedOut: true, command, error: 'timed out' };
   if (result.error) return { passed: false, infrastructure: true, command, error: result.error.message };
   if (result.signal) return { passed: false, interrupted: true, command, error: `terminated by ${result.signal}` };
+  // Exit codes the user reserves for "the environment failed" (a container did not start) say nothing about the test.
+  if (infraExitCodes.includes(result.status)) return { passed: false, infrastructure: true, command, error: `exit status ${result.status} is reserved for environment failures: ${(result.stderr || result.stdout || '').trim().split('\n').slice(0, 3).join(' | ')}` };
   return result.status === 0 ? { passed: true, command } : { passed: false, command, error: result.stderr || result.stdout || `exit status ${result.status}` };
 }
 
@@ -216,7 +221,7 @@ const lineAt = (text, offset) => {
  * to verify a test file that already exists at `testPath`. Relative paths are resolved against the current directory.
  */
 export function verifyGenerated(testSource, options = {}) {
-  const { runner = 'node', functions, lines, maxMutants = 30, maxPerKind, timeoutMs, minScore = 0, command } = options;
+  const { runner = 'node', functions, lines, maxMutants = 30, maxPerKind, timeoutMs, minScore = 0, command, infraExitCodes } = options;
   const unverified = (reason, extra = {}) => ({ verified: false, reason, correctCode: { passed: false }, injectedBug: { passed: false }, mutants: [], killed: 0, total: 0, ignored: 0, mutationScore: null, ...extra });
   if (!options.sourceFile || !fs.existsSync(options.sourceFile)) return unverified('no source file to mutate: pass options.sourceFile');
   const sourceFile = path.resolve(options.sourceFile);
@@ -247,7 +252,7 @@ export function verifyGenerated(testSource, options = {}) {
   const runSource = map(sourceFile);
   const runTestPath = map(testPath);
   const cwd = path.resolve(options.cwd ?? path.dirname(sourceFile));
-  const runOptions = { runner, cwd: map(cwd), timeoutMs, command };
+  const runOptions = { runner, cwd: map(cwd), timeoutMs, command, infraExitCodes };
 
   // In place, writing `testSource` to an existing file would destroy it (the finally block deletes it afterwards).
   if (ownsTest && !mirror && fs.existsSync(runTestPath)) return unverified(`refusing to overwrite the existing file ${runTestPath}: pass testSource: null to verify it, or use another testPath`, { isolation, warnings });
